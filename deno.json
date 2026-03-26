@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true
+  },
+  "imports": {
+    "@std/path": "jsr:@std/path@^1",
+    "@std/archive": "jsr:@std/archive@^1",
+    "@std/io": "jsr:@std/io@^0.225",
+    "@std/fs": "jsr:@std/fs@^1",
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@^2",
+    "cliffy/command": "https://deno.land/x/cliffy@v1.0.0-rc.4/command/mod.ts",
+    "cliffy/table": "https://deno.land/x/cliffy@v1.0.0-rc.4/table/mod.ts"
+  },
+  "tasks": {
+    "dev": "deno run --allow-net --allow-read --allow-write --allow-run=podman,git --allow-env cli/main.ts",
+    "build": "deno compile --allow-net --allow-read --allow-write --allow-run=podman,git --allow-env --output ash cli/main.ts",
+    "test": "deno test --allow-all"
+  }
+}

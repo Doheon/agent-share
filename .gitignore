@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# 빌드 결과물
+ash
+ash-*
+
+# 환경설정 (민감 정보)
+.env
+.env.*
+
+# OMC 작업 파일
+.omc/state/
+.omc/notepad.md
+
+# Deno 캐시
+.deno/
