@@ -1,122 +1,105 @@
-/**
- * Podman rootless 컨테이너 실행 래퍼
- * 수락자의 AI 에이전트를 완전 격리된 환경에서 실행
- */
-
+import { stat, writeFile, chmod } from "node:fs/promises";
+import { join } from "node:path";
 import { FULL_IMAGE, ensureImage } from "./image.ts";
-import type { RunResult } from "../../shared/types.ts";
+import { getRuntime, type ContainerRuntime } from "./runtime.ts";
+import type { AgentType, RunResult } from "../../shared/types.ts";
+import { loadAgentToken } from "../../cli/client.ts";
+import { spawn } from "../util/spawn.ts";
+
+import { ASH_DIR } from "../../cli/ash_dir.ts";
 
 export interface SandboxOptions {
-  taskDir: string;         // 호스트의 작업 폴더 (/workspace로 마운트)
-  agentCmd: string;        // e.g., "claude"
-  agentArgs?: string[];    // 추가 인자
+  taskDir: string;
+  agent: AgentType;
   prompt: string;
-  allowedHosts: string[];  // e.g., ["api.anthropic.com"]
-  apiKey: string;          // 수락자 에이전트 API 키
-  onLog?: (line: string) => void; // 실시간 로그 콜백
-  timeoutMs?: number;      // 기본 25분 (30분 타임아웃 전 여유)
+  allowedHosts: string[];
+  onLog?: (line: string) => void;
+  timeoutMs?: number;
+}
+
+// Prompt is written to /task/prompt.txt inside the container; the command
+// reads it via shell redirection so no user-controlled content is ever
+// interpolated into the shell argument string.
+//
+// For Claude the token is read from the mounted secret file at invocation
+// time and exported as CLAUDE_CODE_OAUTH_TOKEN — claude-code's supported env
+// vars are CLAUDE_CODE_OAUTH_TOKEN (value) and
+// CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR (fd). It does NOT read
+// CLAUDE_CODE_OAUTH_TOKEN_FILE (path). Using shell substitution keeps the
+// token value out of the container's argv / inspect output; it lives only
+// in the claude process's own environment.
+export function buildAgentCommand(agent: AgentType): string {
+  if (agent === "claude") {
+    return `export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/agent-token)" && claude --dangerously-skip-permissions < /task/prompt.txt`;
+  }
+  return `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check < /task/prompt.txt`;
+}
+
+export function networkMode(runtime: ContainerRuntime, hasHosts: boolean): string {
+  if (!hasHosts) return "none";
+  return runtime === "podman" ? "slirp4netns:allow_host_loopback=false" : "bridge";
 }
 
 export async function runAgentInSandbox(opts: SandboxOptions): Promise<RunResult> {
-  const {
-    taskDir,
-    agentCmd,
-    agentArgs = [],
-    prompt,
-    allowedHosts,
-    apiKey,
-    onLog,
-    timeoutMs = 25 * 60 * 1000,
-  } = opts;
+  const { taskDir, agent, prompt, allowedHosts, onLog, timeoutMs = 25 * 60 * 1000 } = opts;
 
+  const runtime = await getRuntime();
   await ensureImage();
 
-  // 네트워크 화이트리스트 구성
-  const networkMode = allowedHosts.length > 0
-    ? `slirp4netns:allow_host_loopback=false`
-    : "none";
+  // Write prompt to a file so it is never interpolated into shell arguments.
+  const promptFile = join(taskDir, "prompt.txt");
+  await writeFile(promptFile, prompt, { encoding: "utf8" });
+
+  const authArgs: string[] = [];
+
+  if (agent === "claude") {
+    const token = await loadAgentToken();
+    if (!token) throw new Error("No agent token found. Run: ash init");
+    // Write token to a file with restricted permissions so it is not exposed
+    // as a plain env var in process listings or container inspect output.
+    const tokenFile = join(taskDir, "agent-token");
+    await writeFile(tokenFile, token, { encoding: "utf8" });
+    await chmod(tokenFile, 0o600);
+    authArgs.push(`--volume=${tokenFile}:/run/secrets/agent-token:ro`);
+  } else if (agent === "codex") {
+    const codexAuthDir = `${ASH_DIR}/codex-session/.codex`;
+    try {
+      await stat(`${codexAuthDir}/auth.json`);
+    } catch {
+      throw new Error("No Codex session found. Run: ash init");
+    }
+    authArgs.push(`--volume=${codexAuthDir}:/home/sandboxuser/.codex`);
+  }
 
   const args: string[] = [
-    "run",
-    "--rm",
-    `--network=${networkMode}`,
+    "run", "--rm",
+    `--network=${networkMode(runtime, allowedHosts.length > 0)}`,
     `--volume=${taskDir}:/workspace:z`,
-    "--read-only",
+    // Mount taskDir read-only at /task so the agent command can read prompt.txt
+    // and the agent-token secret without being able to write outside /workspace.
+    `--volume=${taskDir}:/task:ro`,
     "--tmpfs", "/tmp:rw,noexec,nosuid,size=100m",
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",
-    "--env-host=false",
-    "--env", `ANTHROPIC_API_KEY=${apiKey}`,
-    "--env", `OPENAI_API_KEY=${apiKey}`,
-    "--env", `AGENT_PROMPT=${prompt}`,
+    ...authArgs,
     "--workdir", "/workspace",
     FULL_IMAGE,
-    agentCmd,
-    "-p", prompt,
-    ...agentArgs,
+    buildAgentCommand(agent),
   ];
 
-  const cmd = new Deno.Command("podman", {
-    args,
-    stdout: "piped",
-    stderr: "piped",
+  const proc = spawn([runtime, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+    onLine: onLog ? (_s, line) => onLog(line) : undefined,
   });
 
-  const process = cmd.spawn();
-
-  const stdout: string[] = [];
-  const stderr: string[] = [];
-
-  // stdout 스트리밍
-  const stdoutReader = process.stdout.getReader();
-  const stderrReader = process.stderr.getReader();
-  const dec = new TextDecoder();
-
-  const readStream = async (
-    reader: ReadableStreamDefaultReader<Uint8Array>,
-    buffer: string[],
-  ) => {
-    let partial = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = partial + dec.decode(value, { stream: true });
-      const lines = chunk.split("\n");
-      partial = lines.pop() ?? "";
-      for (const line of lines) {
-        buffer.push(line);
-        onLog?.(line);
-      }
-    }
-    if (partial) {
-      buffer.push(partial);
-      onLog?.(partial);
-    }
-  };
-
-  // 타임아웃 설정
-  const timeout = setTimeout(async () => {
-    try {
-      await new Deno.Command("podman", {
-        args: ["kill", "--signal", "SIGKILL"],
-        stdout: "null",
-        stderr: "null",
-      }).output();
-    } catch { /* 이미 종료됨 */ }
+  const timeout = setTimeout(() => {
+    proc.kill("SIGKILL");
   }, timeoutMs);
 
   try {
-    await Promise.all([
-      readStream(stdoutReader, stdout),
-      readStream(stderrReader, stderr),
-    ]);
-
-    const { code } = await process.status;
-    return {
-      exitCode: code,
-      stdout: stdout.join("\n"),
-      stderr: stderr.join("\n"),
-    };
+    const [code, stdout, stderr] = await Promise.all([proc.exited, proc.stdout, proc.stderr]);
+    return { exitCode: code, stdout, stderr };
   } finally {
     clearTimeout(timeout);
   }

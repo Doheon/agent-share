@@ -1,60 +1,59 @@
-/**
- * Git diff 추출 모듈
- * git add -A && git diff HEAD 로 신규 파일 포함 전체 변경사항 캡처
- */
-
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { DiffResult } from "../../shared/types.ts";
+import { spawn } from "../util/spawn.ts";
 
-async function runGit(args: string[], cwd: string): Promise<{ success: boolean; stdout: string; stderr: string }> {
-  const cmd = new Deno.Command("git", {
-    args,
-    cwd,
-    stdout: "piped",
-    stderr: "piped",
-  });
-  const { success, stdout, stderr } = await cmd.output();
-  return {
-    success,
-    stdout: new TextDecoder().decode(stdout),
-    stderr: new TextDecoder().decode(stderr),
-  };
+const SANDBOX_FILES = ["prompt.txt", "agent-token"];
+
+async function runGit(
+  args: string[],
+  cwd: string,
+): Promise<{ success: boolean; stdout: string; stderr: string }> {
+  const proc = spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  const [exitCode, stdout, stderr] = await Promise.all([proc.exited, proc.stdout, proc.stderr]);
+  return { success: exitCode === 0, stdout, stderr };
 }
 
-/** 작업 디렉토리를 git repo로 초기화하고 초기 커밋 생성 */
 export async function initRepo(workDir: string): Promise<void> {
   await runGit(["init"], workDir);
   await runGit(["config", "user.email", "sandbox@agent-share"], workDir);
   await runGit(["config", "user.name", "Sandbox"], workDir);
-  await runGit(["add", "-A"], workDir);
-  const { success, stderr } = await runGit(
-    ["commit", "-m", "initial snapshot"],
-    workDir,
-  );
-  if (!success) {
-    throw new Error(`초기 커밋 실패: ${stderr}`);
+
+  // Exclude sandbox infrastructure files from diffs regardless of creation order.
+  const gitignorePath = join(workDir, ".gitignore");
+  let existing = "";
+  try { existing = await readFile(gitignorePath, "utf8"); } catch { /* no .gitignore yet */ }
+  const toAdd = SANDBOX_FILES.filter((f) => !existing.split("\n").includes(f));
+  if (toAdd.length > 0) {
+    const sep = existing && !existing.endsWith("\n") ? "\n" : "";
+    await writeFile(gitignorePath, existing + sep + toAdd.join("\n") + "\n", "utf8");
   }
+
+  await runGit(["add", "-A"], workDir);
+  // --allow-empty lets initRepo succeed when the unpacked project is empty
+  // (e.g. requester ran `ash` from a directory that was entirely ignored).
+  const { success, stderr } = await runGit(["commit", "--allow-empty", "-m", "initial snapshot"], workDir);
+  if (!success) throw new Error(`Initial commit failed: ${stderr}`);
 }
 
-/** 에이전트 실행 후 변경사항을 diff로 추출 */
 export async function extractDiff(workDir: string): Promise<DiffResult> {
-  // 신규 파일 포함 스테이징
   await runGit(["add", "-A"], workDir);
 
-  // unified diff 추출
-  const { stdout: patch } = await runGit(
-    ["diff", "--cached", "--unified=3"],
-    workDir,
-  );
+  const { stdout: patch }   = await runGit(["diff", "--cached", "--unified=3"], workDir);
+  const { stdout: numstat } = await runGit(["diff", "--cached", "--numstat"], workDir);
 
-  // 통계 추출
-  const { stdout: stat } = await runGit(
-    ["diff", "--cached", "--stat"],
-    workDir,
-  );
-
-  const filesChanged = (stat.match(/\d+ file/g) ?? []).length;
-  const insertions = parseInt(stat.match(/(\d+) insertion/)?.[1] ?? "0");
-  const deletions = parseInt(stat.match(/(\d+) deletion/)?.[1] ?? "0");
+  let insertions = 0;
+  let deletions = 0;
+  let filesChanged = 0;
+  for (const line of numstat.split("\n")) {
+    if (!line.trim()) continue;
+    const [add, del] = line.split("\t").map(Number);
+    if (!isNaN(add) && !isNaN(del)) {
+      insertions += add;
+      deletions += del;
+      filesChanged++;
+    }
+  }
 
   return { patch, filesChanged, insertions, deletions };
 }

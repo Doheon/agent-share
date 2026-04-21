@@ -1,194 +1,281 @@
-# agentshare
+# ash
 
-> AI 코딩 에이전트 구독의 유휴 시간을 커뮤니티와 공유하는 오픈소스 플랫폼
+[한국어](./README.ko.md)
+
+> Distributed P2P AI coding agent network — share idle compute, earn credits, fully self-hosted.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Deno](https://img.shields.io/badge/Runtime-Deno_2.x-black?logo=deno)](https://deno.com)
+[![Runtime: Node.js](https://img.shields.io/badge/Runtime-Node.js-green)](https://nodejs.org)
 
 ---
 
-## 왜 만들었나?
+## Why ash?
 
-Claude Code $20 플랜은 **5시간 세션 제한**이 있습니다. 다음 플랜은 $100입니다.
+Claude Code's $20 plan has a **5-hour session limit**. The next tier is $100/month.
 
-평일 낮에는 AI 도구를 거의 안 씁니다. 주말에는 집중해서 쓰고 싶습니다.
-
-**agentshare**는 이 불균형을 해결합니다.
-
-- 평일 유휴 시간에 **수락자**로 참여 → 크레딧 적립
-- 주말 집중 코딩 시 적립한 크레딧으로 **타인의 유휴 시간** 사용
-- 결과: $20 플랜으로 $100 플랜 수준의 유연성 확보
-
-Claude Code에 한정되지 않습니다. opencode, 로컬 모델 등 어떤 AI 에이전트든 사용 가능합니다.
+Most developers don't use AI tools heavily every day. **ash** lets you earn credits by accepting coding tasks during idle time, and spend them on AI-assisted development when you need it.
 
 ---
 
-## 동작 방식
+## How it works
+
+ash is a peer-to-peer network, not a server. When you submit a task:
 
 ```
-요청자                          서버 (Supabase)              수락자
-  │                                  │                          │
-  ├─ 코드 암호화 (AES-256-GCM) ──►  │                          │
-  ├─ 업로드 + 작업 등록 ──────────►  │                          │
-  │                                  │ ◄── 작업 수락 ───────────┤
-  │                                  │     에스크로 처리         │
-  │                                  │                          ├─ 복호화
-  │                                  │                          ├─ Podman 컨테이너 실행
-  │                                  │                          ├─ AI 에이전트 작업
-  │                                  │                          ├─ git diff 추출
-  │                                  │ ◄── diff 업로드 ─────────┤
-  │ ◄── diff 수신 알림 ─────────────  │                          │
-  ├─ diff 리뷰                        │                          │
-  ├─ 승인 ────────────────────────►  │                          │
-  │                                  ├─ 크레딧 지급 ────────────►│
+You (requester)             Hyperswarm DHT              Peer (acceptor)
+      │                           │                          │
+      ├─ Prompt + code ──────────►│                          │
+      │    (AES-256-GCM)          │ ◄────── peer:announce ───┤
+      │                           │                          │
+      │ ◄─── RSA pubkey ──────────┼──────────────────────────┤
+      ├─ AES key (RSA-OAEP) ─────►│ ────────────────────────►│
+      │                           │                   decrypt │
+      │                           │                   run AI  │
+      │ ◄─── git diff ────────────┼──────────────────────────┤
+      │     (AES-256-GCM)         │     settlement event      │
+      └─ Credits updated          │                          │
 ```
 
----
+**Key properties:**
 
-## 보안
+- **End-to-end encryption**: Code and diffs encrypted with AES-256-GCM. Peers exchange keys via RSA-OAEP. Server sees nothing.
+- **Signed append-only logs**: Each peer keeps a local Ed25519-signed event log at `~/.ash/log/`. Identity is portable across networks.
+- **Sandboxed execution**: Acceptors run AI agents in rootless Podman containers (`--cap-drop=ALL`, `--read-only`).
+- **Atomic claims**: Only one peer can accept a task. Settlement is atomic — credits are issued when the acceptor completes work.
 
-- **E2EE**: 코드는 AES-256-GCM으로 암호화 전송. 서버는 평문을 볼 수 없음
-- **Podman rootless**: 에이전트는 OS 수준 격리 컨테이너에서 실행
-  - `--cap-drop=ALL`: 모든 Linux capability 제거
-  - `--read-only`: 컨테이너 루트 파일시스템 읽기 전용
-  - `--env-host=false`: 수락자 환경변수 완전 차단
-- **경로 검증**: tar 언팩 시 symlink · path traversal 즉시 거부
-- **소스코드 노출 고지**: 수락자가 코드를 볼 수 있음을 명시적으로 고지
-
-> ⚠️ **주의**: 수락자는 작업 코드를 평문으로 열람할 수 있습니다.
-> 회사 코드 · NDA 대상 코드는 사용자 본인의 책임으로 판단하세요.
+> **Security note**: Acceptors can read your code in plaintext. Do not submit company code or anything covered by NDA.
 
 ---
 
-## 설치
+## Installation
+
+**Requirements:** Node.js 18+, git
 
 ```bash
-# Deno 설치 (https://deno.com)
-curl -fsSL https://deno.land/install.sh | sh
+git clone https://github.com/Doheon/ash
+cd ash
+npm install
+npm install -g .
+ash init
+```
 
-# 소스에서 바이너리 빌드
-git clone https://github.com/your-org/agentshare
-cd agentshare
-deno task build
+This creates `~/.ash/` with your Ed25519 keypair and configuration.
 
-# 또는 릴리즈 바이너리 다운로드 (런타임 불필요)
-curl -fsSL https://github.com/your-org/agentshare/releases/latest/download/ash-$(uname -s)-$(uname -m) -o ash
-chmod +x ash
+---
+
+## Quick start
+
+### Set up your identity and agent
+
+```bash
+ash init
+```
+
+Prompts for:
+- Username
+- Preferred AI agent (Claude, Codex)
+- Environment checks (Podman/Docker, git, etc.)
+
+### As a requester — get AI coding work done
+
+```bash
+# Interactive chat mode
+ash
+
+# Or submit a one-shot task
+ash run "add TypeScript types to my project"
+```
+
+Your code is packaged, encrypted, and announced to the P2P network. When a peer accepts:
+
+1. They claim the task atomically
+2. You send the AES key (via RSA-OAEP)
+3. They decrypt, run the AI agent, extract a git diff
+4. Diff is sent back encrypted
+5. You approve/reject; credits settle
+
+### As an acceptor — earn credits
+
+```bash
+# Serve 5 tasks (AI mode, default)
+ash serve -n 5
+
+# Serve indefinitely
+ash serve
+
+# Serve all tasks, including your own (local testing)
+ash serve --allow-self
+```
+
+When a task is available:
+1. Claim it atomically
+2. Receive the AES key
+3. Decrypt the code
+4. Run the AI agent in a sandbox
+5. Extract and send back the diff
+6. Receive settlement credits
+
+### Check balance
+
+```bash
+ash status
+```
+
+Shows your username, credit balance, and configured model.
+
+---
+
+## Commands
+
+| Command | Purpose |
+|---------|---------|
+| `ash init` | Create keypair, username, agent preference |
+| `ash` | Interactive chat mode (TUI) |
+| `ash run "<prompt>"` | Submit a one-shot task |
+| `ash serve [-n N]` | Accept tasks and earn credits |
+| `ash serve --allow-self` | Include your own tasks (testing) |
+| `ash status` | Show identity and balance |
+| `ash set <model>` | Set model tier (e.g., `claude-sonnet`) |
+| `ash login` | Refresh session (if needed) |
+| `ash setup` | Re-run environment checks |
+| `ash mine` | Earn credits from GitHub contributions |
+
+---
+
+## Policy
+
+Economic parameters live in [`shared/policy.ts`](shared/policy.ts) and are versioned
+with the package. Changing any value is a minor-release event.
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `SIGNUP_BONUS` | `100` | Credits issued to each new user on request |
+| `FEE_BPS` | `0` | Platform fee in basis points (100 bps = 1%) |
+| `TREASURY_PUBKEY` | `ADMIN_PUBKEY` | Receives fees when `FEE_BPS > 0` |
+| `MODEL_CREDITS` | haiku 8 · sonnet 15 · opus 25 · codex 15 | Credit cost per task |
+
+### New user onboarding (automatic)
+
+Signup bonus is issued as an **admin-signed `MintEvent`**. The client-side
+`SIGNUP_BONUS` constant is only a reference value — replay only credits mints
+signed by `ADMIN_PUBKEY`, so forking the client and changing the number does
+not yield credit. Replay also caps each recipient at **one** `reason:
+"signup"` mint, so a buggy watcher cannot double-issue.
+
+Flow:
+
+1. `ash init` records a signed `SignupEvent` in the user's Hypercore.
+2. When the user joins the network (any of `ash`, `ash run`, `ash serve`,
+   `ash peers`), their peer:info reaches a coordinator that runs
+   `ash admin watch-signups`.
+3. The coordinator replicates the user's core, verifies the SignupEvent, and
+   appends a `MintEvent { reason: "signup", amount: SIGNUP_BONUS }` to its
+   own admin Hypercore.
+4. On the user's next `ash status`, the bonus is credited.
+
+If no coordinator is online when the user first joins, the SignupEvent stays
+pending in the user's core; it will be picked up the next time a coordinator
+and the user overlap on the network.
+
+A coordinator is any machine that runs:
+
+```bash
+ash admin watch-signups          # uses SIGNUP_BONUS from shared/policy.ts
+ash admin watch-signups --bonus 50   # override
+```
+
+The watcher requires the admin keypair at `~/.ash/keys/admin.ed25519`. The
+process stays up indefinitely and mints signup bonuses as new peers appear.
+
+### Forgery defense
+
+The balance replay at [`core/ledger/events.ts`](core/ledger/events.ts)
+enforces four invariants so credit can only enter the system through an
+admin mint or a real counterparty transaction:
+
+1. `SpendEvent` must be signed by the log owner.
+2. `EarnEvent` must be signed by `counterparty_pubkey`.
+3. Each `EarnEvent` must have a matching `SpendEvent` in the counterparty's
+   log — blocks the "fake counterparty keypair" forgery.
+4. Running balance must stay ≥ 0.
+
+---
+
+## Architecture
+
+### Identity and logs
+
+- **Keypair**: Ed25519 at `~/.ash/keys/ed25519`
+- **Event log**: Append-only JSONL at `~/.ash/log/main.jsonl` (hash-chained, signed)
+- **Config**: Username and model tier at `~/.ash/config.json`
+
+Each event (task submission, credit earn, settlement) is signed by your keypair and appended. Balance is derived by replaying the log.
+
+### Peer discovery
+
+Uses **Hyperswarm** (DHT-based). Fixed topic: `sha256("ash-network-v1")`. Peers announce themselves and listen for tasks.
+
+### Encryption
+
+- **Code → acceptor**: AES-256-GCM (random IV per task)
+- **AES key exchange**: RSA-OAEP (acceptor's public key)
+- **Integrity**: HMAC-SHA256 on all messages
+
+### Sandbox
+
+Acceptors run AI agents in a rootless Podman container with:
+- `--cap-drop=ALL` (no capabilities)
+- `--read-only` (immutable root filesystem)
+- `--tmpfs /tmp` (writable tmpdir only)
+
+---
+
+## Troubleshooting
+
+### `not initialized`
+
+Run `ash init` first.
+
+### Task not claiming
+
+Check that:
+- At least one peer is running `ash serve`
+- Network connectivity (Hyperswarm DHT access)
+- Firewall allows UTP/UDP
+
+### Balance not updating
+
+1. Check the event log: `cat ~/.ash/log/main.jsonl | jq .`
+2. Ensure the acceptor completed the task (no errors in sandbox)
+3. Settlement is atomic — if claim failed, credits aren't issued
+
+### Podman errors
+
+If `ash serve` fails:
+
+```bash
+# Check Podman
+podman run --rm alpine echo "ok"
+
+# Fallback to Docker
+export ASH_PODMAN_CMD=docker
+ash serve
 ```
 
 ---
 
-## 시작하기
+## Development
 
-### 1. 의존성 설치 및 초기화
-
-```bash
-ash setup
-```
-
-다음을 자동으로 확인하고 설정합니다:
-- git, podman 설치 여부
-- Podman rootless 및 machine 실행 여부 (macOS)
-- sandbox 이미지 자동 빌드
-- RSA 키쌍 생성 (`~/.agent-share/keys/`)
-
-### 2. 수락자로 참여 (크레딧 적립)
+Clone and run locally:
 
 ```bash
-# 평일 9시~18시에 자동으로 작업 수락
-ash daemon start --schedule "mon-fri 09:00-18:00" --agent claude
-
-# 언제나 실행
-ash daemon start
-
-# 데몬 상태 확인
-ash daemon status
-
-# 중지
-ash daemon stop
-```
-
-### 3. 작업 요청 (크레딧 사용)
-
-```bash
-# 작업 등록
-ash submit ./my-project --prompt "로그인 버튼 클릭 시 500 에러를 수정해줘" --credits 10
-
-# 작업 목록 확인
-ash list
-
-# diff 수신 후 리뷰
-ash review <task_id>
-
-# 승인 (크레딧 지급)
-ash approve <task_id>
-
-# 거부 (크레딧 환불)
-ash reject <task_id>
-```
-
-### 4. 잔액 및 통계
-
-```bash
-ash balance       # 크레딧 잔액
-ash stats         # 개인 기여/사용 통계
-ash leaderboard   # 기여자 랭킹
+npm run dev                 # Run CLI with tsx
+npm run test                # Run tests
+npm run build               # Build distributable tarball
 ```
 
 ---
 
-## 커맨드 목록
+## License
 
-| 커맨드 | 설명 |
-|--------|------|
-| `signup` | 새 계정 생성 |
-| `login` | 로그인 |
-| `logout` | 로그아웃 |
-| `setup` | 의존성 체크 및 초기화 |
-| `submit <dir>` | 작업 요청 |
-| `list` | 수락 가능한 작업 목록 |
-| `accept <id>` | 단일 작업 수락 및 실행 |
-| `daemon start/stop/status` | 데몬 모드 관리 |
-| `review <id>` | diff 리뷰 |
-| `approve <id>` | diff 승인 |
-| `reject <id>` | diff 거부 |
-| `balance` | 크레딧 잔액 |
-| `stats` | 개인 통계 |
-| `leaderboard` | 기여자 랭킹 |
-
----
-
-## 환경변수
-
-| 변수 | 설명 |
-|------|------|
-| `AGENT_SHARE_SUPABASE_URL` | Supabase 프로젝트 URL |
-| `AGENT_SHARE_SUPABASE_ANON_KEY` | Supabase anon 키 |
-| `ANTHROPIC_API_KEY` | Claude 에이전트 API 키 |
-
-또는 `~/.agent-share/config.json` 파일로 설정:
-
-```json
-{
-  "supabaseUrl": "https://xxx.supabase.co",
-  "supabaseAnonKey": "eyJ..."
-}
-```
-
----
-
-## 기여하기
-
-PR과 이슈 환영합니다.
-
-```bash
-git clone https://github.com/your-org/agentshare
-cd agentshare
-deno task test
-```
-
----
-
-## 라이선스
-
-[MIT](./LICENSE)
+MIT

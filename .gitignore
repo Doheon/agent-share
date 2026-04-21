@@ -1,6 +1,9 @@
 # macOS
 .DS_Store
 
+# Node
+node_modules/
+
 # 빌드 결과물
 ash
 ash-*
@@ -9,9 +12,19 @@ ash-*
 .env
 .env.*
 
-# OMC 작업 파일
-.omc/state/
-.omc/notepad.md
+# OMC / editor internals
+.omc/
+.obsidian/
 
 # Deno 캐시
 .deno/
+
+# Supabase
+supabase/.temp/
+
+# Claude
+CLAUDE.md
+.claude/settings.json
+
+# Plan
+PLAN.md

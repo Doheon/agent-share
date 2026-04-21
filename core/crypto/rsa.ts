@@ -1,6 +1,6 @@
 /**
- * RSA-OAEP 키 생성 및 AES 키 교환 모듈
- * 수락자의 공개키로 AES 키를 암호화하여 안전하게 전달
+ * RSA-OAEP key generation and AES key exchange
+ * Encrypts the AES key with the acceptor's public key for secure delivery.
  */
 
 const RSA_ALGORITHM = "RSA-OAEP";
@@ -26,7 +26,7 @@ export async function generateKeyPair(): Promise<RsaKeyPair> {
   return { publicKey: keyPair.publicKey, privateKey: keyPair.privateKey };
 }
 
-/** 공개키를 PEM 형식으로 내보내기 */
+/** Export public key as PEM */
 export async function exportPublicKeyPem(publicKey: CryptoKey): Promise<string> {
   const spki = await crypto.subtle.exportKey("spki", publicKey);
   const b64 = btoa(String.fromCharCode(...new Uint8Array(spki)));
@@ -34,7 +34,7 @@ export async function exportPublicKeyPem(publicKey: CryptoKey): Promise<string> 
   return `-----BEGIN PUBLIC KEY-----\n${lines}\n-----END PUBLIC KEY-----`;
 }
 
-/** 개인키를 PEM 형식으로 내보내기 */
+/** Export private key as PEM */
 export async function exportPrivateKeyPem(privateKey: CryptoKey): Promise<string> {
   const pkcs8 = await crypto.subtle.exportKey("pkcs8", privateKey);
   const b64 = btoa(String.fromCharCode(...new Uint8Array(pkcs8)));
@@ -42,7 +42,7 @@ export async function exportPrivateKeyPem(privateKey: CryptoKey): Promise<string
   return `-----BEGIN PRIVATE KEY-----\n${lines}\n-----END PRIVATE KEY-----`;
 }
 
-/** PEM 형식 공개키 가져오기 */
+/** Import public key from PEM */
 export async function importPublicKeyPem(pem: string): Promise<CryptoKey> {
   const b64 = pem
     .replace(/-----BEGIN PUBLIC KEY-----/, "")
@@ -58,7 +58,7 @@ export async function importPublicKeyPem(pem: string): Promise<CryptoKey> {
   );
 }
 
-/** PEM 형식 개인키 가져오기 */
+/** Import private key from PEM */
 export async function importPrivateKeyPem(pem: string): Promise<CryptoKey> {
   const b64 = pem
     .replace(/-----BEGIN PRIVATE KEY-----/, "")
@@ -74,7 +74,7 @@ export async function importPrivateKeyPem(pem: string): Promise<CryptoKey> {
   );
 }
 
-/** AES 키를 수락자 공개키로 암호화 → base64 반환 */
+/** Encrypt AES key with recipient's public key → base64 */
 export async function encryptAesKey(
   aesKeyRaw: Uint8Array,
   recipientPublicKey: CryptoKey,
@@ -82,12 +82,12 @@ export async function encryptAesKey(
   const encrypted = await crypto.subtle.encrypt(
     { name: RSA_ALGORITHM },
     recipientPublicKey,
-    aesKeyRaw,
+    aesKeyRaw as unknown as Uint8Array<ArrayBuffer>,
   );
   return btoa(String.fromCharCode(...new Uint8Array(encrypted)));
 }
 
-/** base64 암호화된 AES 키를 개인키로 복호화 */
+/** Decrypt base64-encoded AES key with private key */
 export async function decryptAesKey(
   encryptedKeyB64: string,
   privateKey: CryptoKey,

@@ -1,11 +1,21 @@
-/**
- * 민감 정보 스캐너
- * submit 전 실행 — fail-closed: 감지 시 업로드 차단
- */
-
-import { join } from "@std/path";
-import { walk } from "@std/fs";
+import { readFile } from "node:fs/promises";
+import { walk } from "../util/walk.ts";
 import type { ScanResult } from "../../shared/types.ts";
+import { loadGitignorePatterns } from "../util/gitignore.ts";
+
+const ALWAYS_SKIP: RegExp[] = [
+  /^\.git\//,
+  /^node_modules\//,
+  /^\.env/,
+  /^\.claude\//,
+  /^\.omc\//,
+  // Test files commonly contain fake fixtures that look like secrets.
+  /(^|\/)tests?\//,
+  /(^|\/)__tests?__\//,
+  /(^|\/)spec\//,
+  /\.(test|spec)\.[a-zA-Z]+$/,
+  /_test\.[a-zA-Z]+$/,
+];
 
 interface SecretPattern {
   name: string;
@@ -13,16 +23,8 @@ interface SecretPattern {
 }
 
 const FILE_PATTERNS: RegExp[] = [
-  /^\.env$/,
-  /^\.env\./,
-  /\.pem$/,
-  /\.key$/,
-  /\.p12$/,
-  /\.pfx$/,
-  /credentials\.json$/,
-  /secrets\.json$/,
-  /secret\.yaml$/,
-  /secret\.yml$/,
+  /^\.env$/, /^\.env\./, /\.pem$/, /\.key$/, /\.p12$/, /\.pfx$/,
+  /credentials\.json$/, /secrets\.json$/, /secret\.yaml$/, /secret\.yml$/,
 ];
 
 const CONTENT_PATTERNS: SecretPattern[] = [
@@ -44,7 +46,7 @@ const CONTENT_PATTERNS: SecretPattern[] = [
   { name: "Generic API Key", pattern: /(?:api[_\-]?key|apikey)\s*[=:]\s*["']?[A-Za-z0-9\-_]{20,}["']?/i },
   { name: "Generic Secret", pattern: /(?:secret|password|passwd|pwd)\s*[=:]\s*["'][^"']{8,}["']/i },
   { name: "Generic Token", pattern: /(?:token|access_token|auth_token)\s*[=:]\s*["'][A-Za-z0-9\-_\.]{20,}["']/i },
-  { name: "Private Key Block", pattern: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/ },
+  { name: "Private Key Block", pattern: /^-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/ },
   { name: "Database URL with credentials", pattern: /(?:postgres|mysql|mongodb|redis):\/\/[^:]+:[^@]+@/ },
 ];
 
@@ -53,59 +55,46 @@ function isFileSensitive(filename: string): boolean {
   return FILE_PATTERNS.some((p) => p.test(base));
 }
 
-async function scanFileContent(
-  filePath: string,
-  relPath: string,
-): Promise<ScanResult[]> {
+async function scanFileContent(filePath: string, relPath: string): Promise<ScanResult[]> {
   const results: ScanResult[] = [];
-
   let content: string;
   try {
-    content = await Deno.readTextFile(filePath);
+    content = await readFile(filePath, "utf-8");
   } catch {
-    return results; // 바이너리 파일 등 읽기 불가 시 스킵
+    return results;
   }
-
   const lines = content.split("\n");
   for (let i = 0; i < lines.length; i++) {
+    // Skip lines that are too long (ReDoS protection)
+    if (lines[i].length > 1000) continue;
     for (const { name, pattern } of CONTENT_PATTERNS) {
       const match = lines[i].match(pattern);
       if (match) {
         results.push({
-          file: relPath,
-          line: i + 1,
-          pattern: name,
+          file: relPath, line: i + 1, pattern: name,
           match: match[0].slice(0, 40) + (match[0].length > 40 ? "..." : ""),
         });
       }
     }
   }
-
   return results;
 }
 
 export async function scanDirectory(dir: string): Promise<ScanResult[]> {
   const results: ScanResult[] = [];
+  const gitignorePatterns = await loadGitignorePatterns(dir);
 
-  for await (const entry of walk(dir, { followSymlinks: false })) {
+  for await (const entry of walk(dir)) {
     if (!entry.isFile) continue;
-
     const relPath = entry.path.replace(dir + "/", "");
+    if (ALWAYS_SKIP.some((p) => p.test(relPath))) continue;
+    if (gitignorePatterns.some((p) => p.test(relPath))) continue;
 
-    // 파일명 기반 감지
     if (isFileSensitive(entry.name)) {
-      results.push({
-        file: relPath,
-        line: 0,
-        pattern: "Sensitive filename",
-        match: entry.name,
-      });
+      results.push({ file: relPath, line: 0, pattern: "Sensitive filename", match: entry.name });
       continue;
     }
-
-    // 파일 내용 기반 감지
-    const contentResults = await scanFileContent(entry.path, relPath);
-    results.push(...contentResults);
+    results.push(...await scanFileContent(entry.path, relPath));
   }
 
   return results;
@@ -113,20 +102,12 @@ export async function scanDirectory(dir: string): Promise<ScanResult[]> {
 
 export function formatScanResults(results: ScanResult[]): string {
   if (results.length === 0) return "";
-
-  const lines = [
-    "🚨 민감 정보가 감지되었습니다. 업로드가 차단됩니다.\n",
-  ];
-
+  const lines = ["Sensitive information detected. Upload blocked.\n"];
   for (const r of results) {
     const location = r.line > 0 ? `${r.file}:${r.line}` : r.file;
     lines.push(`  [${r.pattern}] ${location}`);
     lines.push(`    → ${r.match}`);
   }
-
-  lines.push(
-    "\n.gitignore 에 해당 파일을 추가하거나 민감 정보를 제거 후 다시 시도하세요.",
-  );
-
+  lines.push("\nAdd the file(s) to .gitignore or remove the sensitive information, then try again.");
   return lines.join("\n");
 }

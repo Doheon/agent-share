@@ -1,0 +1,28 @@
+{
+  "name": "ash",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "ash": "bin/ash"
+  },
+  "scripts": {
+    "dev": "node --import ./register.mjs --import tsx/esm cli/main.ts",
+    "build": "npm pack",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7",
+    "commander": "^12",
+    "corestore": "^7.9.2",
+    "hypercore": "^11.28.1",
+    "hyperswarm": "latest",
+    "ink": "^7.0.1",
+    "react": "^19",
+    "tsx": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "vitest": "latest"
+  }
+}
