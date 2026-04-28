@@ -20,7 +20,9 @@ import {
 } from "../../core/crypto/keypair.ts";
 import { decryptAesKey, exportPublicKeyPem } from "../../core/crypto/rsa.ts";
 import { unpackToDirectory } from "../../core/packaging/unpack.ts";
-import { runAgentInSandbox } from "../../core/sandbox/runner.ts";
+import { runAgentInSandbox, CODEX_LAST_MESSAGE_FILE } from "../../core/sandbox/runner.ts";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { initRepo, extractDiff } from "../../core/diff/extract.ts";
 import { cleanupTask, ensureTaskDir } from "../../core/sandbox/cleanup.ts";
 import {
@@ -42,11 +44,12 @@ import {
   getRemotePeerBalance,
 } from "../p2p_state.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
+import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
 import { LEDGER_TOPIC } from "../../shared/constants.ts";
 import { signEd25519, verifyEd25519, rawHexToPublicKey } from "../../core/crypto/ed25519.ts";
 import { canonicalStringify } from "../../shared/canonical.ts";
 import { eventWithoutSignature } from "../../shared/events.ts";
-import { fetchPR, fetchPRReviews, ASH_REPO } from "../../core/github/client.ts";
+import { fetchPR, fetchPRReviews, fetchIssue, ASH_REPO } from "../../core/github/client.ts";
 
 const IS_TTY = process.stdout.isTTY && process.env.NO_COLOR === undefined;
 const _a = (c: string) => IS_TTY ? `\x1b[${c}m` : "";
@@ -100,8 +103,9 @@ export async function processTask(
   myPub: string,
   modelTier: string,
   logger: (s: string) => void = out,
-): Promise<void> {
+): Promise<{ earned: number }> {
   const agent = modelToAgent(modelTier);
+  let earned = 0;
 
   // Promises that resolve immediately if the message already arrived before processTask started.
   const matchPromise = new Promise<void>((r) => {
@@ -135,8 +139,13 @@ export async function processTask(
   await unpackToDirectory(ciphertext, aesKeyRaw, iv, workDir);
   await initRepo(workDir);
 
-  // Run the AI agent in the sandbox; mirror logs to the requester.
+  // Run the AI agent in the sandbox. For codex we keep stdout on the acceptor
+  // side (banner, streaming delta, token footer, prompt echo) and forward
+  // only the final assistant message — written to .ash_last.md by
+  // `--output-last-message` — so the requester gets a clean chat transcript.
+  // Claude has no equivalent flag; its stream is still forwarded line-by-line.
   let authHit = false;
+  const forwardLogs = agent !== "codex";
   const { exitCode } = await runAgentInSandbox({
     taskDir: workDir,
     agent,
@@ -144,11 +153,25 @@ export async function processTask(
     allowedHosts: ["api.anthropic.com"],
     onLog: (line) => {
       logger(`  ${D}${line}${R}\n`);
-      active.peer.send({ type: "task:log", task_id: active.taskId, line });
+      if (forwardLogs) {
+        active.peer.send({ type: "task:log", task_id: active.taskId, line });
+      }
       if (isAuthLine(line)) authHit = true;
     },
   });
   logger(`\n  ${D}exit code: ${exitCode}${R}\n`);
+
+  if (agent === "codex" && !authHit) {
+    try {
+      const raw = await readFile(join(workDir, CODEX_LAST_MESSAGE_FILE), "utf8");
+      const trimmed = raw.trim();
+      if (trimmed) {
+        for (const line of trimmed.split("\n")) {
+          active.peer.send({ type: "task:log", task_id: active.taskId, line });
+        }
+      }
+    } catch { /* file missing — codex exited before writing; requester just won't see a reply */ }
+  }
 
   // Extract diff & ship it. If auth failed, send empty patch so the requester rejects cleanly.
   const diff = await extractDiff(workDir);
@@ -199,7 +222,7 @@ export async function processTask(
     logger(`  ${D}settle: reject${R}\n`);
     await cleanupTask(active.taskId);
     if (authHit) throw new AuthError("session expired");
-    return;
+    return { earned };
   }
 
   active.peer.send({ type: "task:settle", task_id: active.taskId, action: "approve" });
@@ -227,6 +250,7 @@ export async function processTask(
         logger(`  ${YL}⚠${R}  earn:cosign invalid — skipping\n`);
       } else {
         await appendLocalEvent(myPub, earn);
+        earned = earn.amount;
         logger(`  ${GR}✓${R}  earn cosigned · +${earn.amount}cr\n`);
       }
     } catch (err) {
@@ -237,6 +261,7 @@ export async function processTask(
   }
 
   await cleanupTask(active.taskId);
+  return { earned };
 }
 
 export async function runServeAi(opts: { count: number; modelTier: string; allowSelf?: boolean }): Promise<void> {
@@ -256,7 +281,7 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
   if (!(await validateAgentCredentials(agent))) {
     out(`\n  ${YL}⚠${R}  ${agent} credentials missing or expired.\n`);
     if (!process.stdin.isTTY) {
-      console.error(`\n  Refresh them with: ash init\n`);
+      console.error(`\n  Refresh them with: ash login\n`);
       process.exit(2);
     }
     const yn = await confirm({ message: "Refresh credentials now?", default: true });
@@ -334,6 +359,13 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
   });
 
   swarm.onMessage(async (peer, msg) => {
+    // Cache any advertised ledger core key so later balance replays can
+    // cross-ref this peer's log (bug fix: earn events were silently dropped
+    // because `getUserCore(pubkey)` returned an empty local stub).
+    if (msg.type === "peer:info") {
+      registerPeerLedgerKey(msg.pubkey, msg.ledger_core_key).catch(() => undefined);
+      return;
+    }
     if (active && active.peer.id === peer.id) {
       switch (msg.type) {
         case "task:match":
@@ -384,6 +416,12 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
         } else if (refType === "review") {
           const reviews = await fetchPRReviews(repo, refNum, ghToken).catch(() => []);
           verified = reviews.length > 0;
+        } else if (refType === "approve") {
+          const reviews = await fetchPRReviews(repo, refNum, ghToken).catch(() => []);
+          verified = reviews.some((r) => r.state === "APPROVED");
+        } else if (refType === "issue") {
+          const issue = await fetchIssue(repo, refNum, ghToken).catch(() => null);
+          verified = !!issue && issue.state === "open";
         }
 
         if (!verified) return;
@@ -420,6 +458,9 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
       out(`  ${D}skip: ${msg.requester_pubkey.slice(0, 8)} missing ledger key${R}\n`);
       return;
     }
+    // Persist the mapping before verifying balance — verifyEarnCrossRef at
+    // replay time will look this up to open the requester's real core.
+    await registerPeerLedgerKey(msg.requester_pubkey, msg.requester_ledger_key).catch(() => undefined);
     try {
       const requesterBalance = await getRemotePeerBalance(msg.requester_ledger_key, msg.requester_pubkey);
       if (requesterBalance <= 0) {
