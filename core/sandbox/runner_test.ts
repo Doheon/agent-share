@@ -45,7 +45,7 @@ test("buildAgentCommand for claude does not interpolate any prompt text", () => 
 test("buildAgentCommand for codex uses stdin redirection from /task/prompt.txt", () => {
   const cmd = buildAgentCommand("codex");
   expect(cmd).toEqual(
-    "codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check < /task/prompt.txt",
+    "codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --output-last-message /workspace/.ash_last.md < /task/prompt.txt",
   );
 });
 
@@ -72,7 +72,7 @@ test("buildAgentCommand output contains no shell-interpolatable user content", (
   // Both commands must be identical on every call (no prompt arg)
   expect(claudeCmd).toEqual(CLAUDE_CMD);
   expect(codexCmd).toEqual(
-    "codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check < /task/prompt.txt",
+    "codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --output-last-message /workspace/.ash_last.md < /task/prompt.txt",
   );
 });
 

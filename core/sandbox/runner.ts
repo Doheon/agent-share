@@ -28,11 +28,20 @@ export interface SandboxOptions {
 // CLAUDE_CODE_OAUTH_TOKEN_FILE (path). Using shell substitution keeps the
 // token value out of the container's argv / inspect output; it lives only
 // in the claude process's own environment.
+//
+// For Codex the final assistant message is also written to
+// /workspace/.ash_last.md via `--output-last-message`. The acceptor reads
+// that file after the run and forwards only the clean final message to the
+// requester — stdout (codex banner, streaming delta, token footer, prompt
+// echo) is kept on the acceptor side only. `.ash_last.md` is listed in
+// SANDBOX_FILES so it never appears in the task diff.
+export const CODEX_LAST_MESSAGE_FILE = ".ash_last.md";
+
 export function buildAgentCommand(agent: AgentType): string {
   if (agent === "claude") {
     return `export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/agent-token)" && claude --dangerously-skip-permissions < /task/prompt.txt`;
   }
-  return `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check < /task/prompt.txt`;
+  return `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --output-last-message /workspace/${CODEX_LAST_MESSAGE_FILE} < /task/prompt.txt`;
 }
 
 export function networkMode(runtime: ContainerRuntime, hasHosts: boolean): string {

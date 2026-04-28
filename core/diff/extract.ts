@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { DiffResult } from "../../shared/types.ts";
 import { spawn } from "../util/spawn.ts";
 
-const SANDBOX_FILES = ["prompt.txt", "agent-token"];
+const SANDBOX_FILES = ["prompt.txt", "agent-token", ".ash_last.md"];
 
 async function runGit(
   args: string[],
