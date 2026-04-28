@@ -109,7 +109,7 @@ export async function fetchOpenPRs(
   repo = ASH_REPO,
   token?: string,
 ): Promise<GitHubPR[]> {
-  const res = await ghFetch(`/repos/${repo}/pulls?state=open&per_page=30`, token);
+  const res = await ghFetch(`/repos/${repo}/pulls?state=open&per_page=100`, token);
   return jsonOrThrow<GitHubPR[]>(res, "fetchOpenPRs");
 }
 
@@ -170,6 +170,32 @@ export async function createPRReview(
     body: JSON.stringify({ body, event }),
   });
   return jsonOrThrow<GitHubReview>(res, "createPRReview");
+}
+
+// ---------------------------------------------------------------------------
+// Issues (write)
+
+export async function fetchIssue(
+  repo: string,
+  issueNumber: number,
+  token?: string,
+): Promise<GitHubIssue> {
+  const res = await ghFetch(`/repos/${repo}/issues/${issueNumber}`, token);
+  return jsonOrThrow<GitHubIssue>(res, "fetchIssue");
+}
+
+export async function createIssue(
+  repo: string,
+  title: string,
+  body: string,
+  labels: string[],
+  token: string,
+): Promise<GitHubIssue> {
+  const res = await ghFetch(`/repos/${repo}/issues`, token, {
+    method: "POST",
+    body: JSON.stringify({ title, body, labels }),
+  });
+  return jsonOrThrow<GitHubIssue>(res, "createIssue");
 }
 
 // ---------------------------------------------------------------------------

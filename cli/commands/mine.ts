@@ -3,14 +3,16 @@
  *
  * Scans the current state of Doheon/ash and selects the highest-priority action:
  *
- *   pr_approve  — a PR I reviewed earlier has no approval yet → approve it
- *   pr_review   — an open PR has no review from me yet → review it
- *   pr_create   — an open issue has no PR yet → implement it → create PR
+ *   pr_approve    — a PR I reviewed earlier has no approval yet → approve it
+ *   pr_review     — an open PR has no review from me yet → review it
+ *   pr_create     — an open issue has no PR yet → implement it → create PR
+ *   issue_create  — no unclaimed issues → analyze codebase → open a new issue
  *
  * Credit rewards:
- *   pr_create   10 cr  (+5 if test files changed)
- *   pr_review    5 cr
- *   pr_approve   3 cr
+ *   pr_create    6 cr  (+3 if test files changed)
+ *   pr_review    3 cr
+ *   pr_approve   2 cr
+ *   issue_create 4 cr
  */
 
 import { Command } from "commander";
@@ -35,6 +37,7 @@ import {
   ensureFork,
   createPR,
   createPRReview,
+  createIssue,
   ASH_REPO,
   type GitHubIssue,
   type GitHubPR,
@@ -49,12 +52,22 @@ import { spawn } from "../../core/util/spawn.ts";
 // Constants
 // ---------------------------------------------------------------------------
 
+// Mine rewards reflect the Claude Code (sonnet-tier) session cost for each action.
+//   pr_create   : full agent session — implements + commits code  → 1 sonnet task
+//   issue_create: full codebase analysis session                  → ~0.7 sonnet task
+//   pr_review   : lighter session — diff pre-embedded in prompt   → ~0.5 sonnet task
+//   pr_approve  : brief text generation only                      → 1 haiku task
 const MINE_CREDITS: Record<MineAction, number> = {
-  pr_create: 10,
-  pr_review: 5,
-  pr_approve: 3,
+  pr_create: 6,
+  pr_review: 3,
+  pr_approve: 2,
+  issue_create: 4,
 };
-const TEST_BONUS = 5;
+const TEST_BONUS = 3;
+
+const ISSUE_CATEGORIES = [
+  "security", "feature", "bug", "testing", "refactor", "dx", "performance",
+] as const;
 
 const IS_TTY = process.stdout.isTTY && process.env.NO_COLOR === undefined;
 const _a = (c: string) => IS_TTY ? `\x1b[${c}m` : "";
@@ -72,15 +85,17 @@ type MineDecision =
   | { action: "pr_approve"; pr: GitHubPR; myReview: GitHubReview }
   | { action: "pr_review"; pr: GitHubPR }
   | { action: "pr_create"; issue: GitHubIssue }
+  | { action: "issue_create"; existingIssues: GitHubIssue[] }
   | { action: "idle"; reason: string };
 
 /**
  * Scans GitHub state and returns the best action to take.
  *
  * Priority:
- *   1. pr_approve — I already reviewed a PR that has no approval yet
- *   2. pr_review  — an open non-draft PR has no review from me
- *   3. pr_create  — an open issue has no linked PR
+ *   1. pr_approve    — I already reviewed a PR that has no approval yet
+ *   2. pr_review     — an open non-draft PR has no review from me
+ *   3. pr_create     — an open issue has no linked PR
+ *   4. issue_create  — no unclaimed issues; analyze codebase and open a new one
  */
 async function selectAction(token: string, myLogin: string): Promise<MineDecision> {
   out(`  ${D}scanning GitHub state…${R}\n`);
@@ -134,7 +149,8 @@ async function selectAction(token: string, myLogin: string): Promise<MineDecisio
     return { action: "pr_create", issue: unclaimedIssue };
   }
 
-  return { action: "idle", reason: "No open issues or PRs need attention right now." };
+  // 4. issue_create: no unclaimed issues — analyze codebase and open a new one.
+  return { action: "issue_create", existingIssues: issues };
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +224,44 @@ function buildApprovePrompt(pr: GitHubPR, diff: string, myReview: GitHubReview):
   ].join("\n");
 }
 
+function buildIssuePrompt(existingIssues: GitHubIssue[]): string {
+  const issueList = existingIssues.length > 0
+    ? existingIssues.map((i, idx) => `  ${idx + 1}. #${i.number} ${i.title}`).join("\n")
+    : "  (none)";
+  const categories = ISSUE_CATEGORIES.join(" | ");
+  return [
+    `You are creating a GitHub issue for the 'ash' project`,
+    `(a fully P2P distributed AI coding agent CLI written in TypeScript/Node.js).`,
+    ``,
+    `Existing open issues (do not duplicate):`,
+    issueList,
+    ``,
+    `Categories: ${categories}`,
+    ``,
+    `Instructions:`,
+    `- Read the source files in this directory to understand the current state.`,
+    `- Pick the category with fewest existing issues where you found a real gap.`,
+    `- Write ONE specific, actionable issue that a single PR can resolve.`,
+    `- Only report problems or improvements you actually observed in the code.`,
+    `- Do not invent problems.`,
+    ``,
+    `Output format (exact — no other text before or after):`,
+    `TITLE: <concise issue title>`,
+    `LABEL: <one of: ${categories}>`,
+    `---`,
+    `<markdown body: problem description, expected behavior, affected files>`,
+  ].join("\n");
+}
+
+function parseIssueOutput(text: string): { title: string; label: string; body: string } | null {
+  const title = text.match(/^TITLE:\s*(.+)$/m)?.[1]?.trim();
+  const label = text.match(/^LABEL:\s*(\w+)$/m)?.[1]?.trim();
+  const sep = text.indexOf("\n---\n");
+  const body = sep >= 0 ? text.slice(sep + 5).trim() : "";
+  if (!title || !label || !body) return null;
+  return { title, label, body };
+}
+
 // ---------------------------------------------------------------------------
 // Git helpers
 // ---------------------------------------------------------------------------
@@ -262,8 +316,9 @@ async function buildSelfSignedEarn(
   nonce: number,
 ): Promise<EarnEvent> {
   const now = new Date().toISOString();
-  const taskSigPayload = canonicalStringify({ task_id: taskId, amount, action: "earn" });
-  const counterpartyTaskSig = signEd25519(privKey, Buffer.from(taskSigPayload)).toString("hex");
+  // Include claimant_pubkey to match the cosign payload format used by serve.ts.
+  const taskSigPayload = canonicalStringify({ task_id: taskId, amount, claimant_pubkey: pubkey, action: "earn" });
+  const counterpartyTaskSig = signEd25519(taskSigPayload, privKey);
   const partial: Omit<EarnEvent, "signature"> = {
     type: "earn",
     nonce,
@@ -273,7 +328,7 @@ async function buildSelfSignedEarn(
     counterparty_pubkey: pubkey,
     counterparty_task_signature: counterpartyTaskSig,
   };
-  const sig = signEd25519(privKey, Buffer.from(canonicalStringify(partial))).toString("hex");
+  const sig = signEd25519(canonicalStringify(partial), privKey);
   return { ...partial, signature: sig };
 }
 
@@ -304,7 +359,7 @@ async function broadcastAndCollectCosign(opts: {
 
     const timer = setTimeout(() => finish(fallbackEarn), 8_000);
 
-    swarm.join().then(() => {
+    swarm.join(privKey, claimantPubkey).then(() => {
       swarm.onMessage((_peer, msg) => {
         if (msg.type !== "mine:cosign" || msg.claim_id !== claimId) return;
         clearTimeout(timer);
@@ -318,7 +373,7 @@ async function broadcastAndCollectCosign(opts: {
           counterparty_pubkey: msg.cosigner_pubkey,
           counterparty_task_signature: msg.cosigner_task_signature,
         };
-        const sig = signEd25519(privKey, Buffer.from(canonicalStringify(partial))).toString("hex");
+        const sig = signEd25519(canonicalStringify(partial), privKey);
         finish({ ...partial, signature: sig });
       });
 
@@ -375,7 +430,7 @@ async function earnCredits(opts: {
 // Action executors
 // ---------------------------------------------------------------------------
 
-async function doPrCreate(issue: GitHubIssue, token: string, myPub: string, privKey: import("node:crypto").KeyObject, ghLogin: string, ghEmail: string): Promise<void> {
+async function doPrCreate(issue: GitHubIssue, token: string, myPub: string, privKey: import("node:crypto").KeyObject, ghLogin: string, ghEmail: string): Promise<boolean> {
   out(`\n  ${B}[implement]${R} #${issue.number} ${issue.title}\n`);
   out(`  ${D}${"─".repeat(56)}${R}\n`);
 
@@ -400,9 +455,20 @@ async function doPrCreate(issue: GitHubIssue, token: string, myPub: string, priv
     const diffStat = await git(["diff", "--stat", "HEAD"], tmpDir).catch(() => "");
     if (!diffStat.trim()) {
       out(`  ${YL}⚠${R}  No changes produced. Skipping.\n`);
-      return;
+      return false;
     }
     out(`\n${diffStat}\n`);
+
+    // Race-condition guard: re-check GitHub in case another peer created a PR while agent was running.
+    const freshPRs = await fetchOpenPRs(ASH_REPO, token);
+    const alreadyLinked = freshPRs.some((p) => {
+      const text = `${p.title} ${p.body ?? ""}`;
+      return [...text.matchAll(/#(\d+)/g)].some((m) => parseInt(m[1]!, 10) === issue.number);
+    });
+    if (alreadyLinked) {
+      out(`  ${YL}⚠${R}  A PR for #${issue.number} was created by another peer. Skipping.\n`);
+      return false;
+    }
 
     await git(["add", "-A"], tmpDir);
     await git(["commit", "-m", `fix: ${issue.title}\n\nResolves #${issue.number}\n\nImplemented via ash mine`], tmpDir);
@@ -425,59 +491,108 @@ async function doPrCreate(issue: GitHubIssue, token: string, myPub: string, priv
       url: pr.html_url,
       extra: testsChanged ? "includes test bonus" : undefined,
     });
+    return true;
   } finally {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
-async function doPrReview(pr: GitHubPR, token: string, myPub: string, privKey: import("node:crypto").KeyObject): Promise<void> {
+async function doPrReview(pr: GitHubPR, token: string, myPub: string, privKey: import("node:crypto").KeyObject): Promise<boolean> {
   out(`\n  ${B}[review]${R} #${pr.number} ${pr.title}\n`);
   out(`  ${D}${"─".repeat(56)}${R}\n`);
 
   out(`  ${D}fetching diff…${R}\n`);
   const diff = await fetchPRDiff(ASH_REPO, pr.number, token);
 
-  out(`  ${CY}running agent…${R}\n`);
-  const { code, text: reviewText } = await runAgentCapture(buildReviewPrompt(pr, diff), process.cwd());
-  out(`  ${D}agent exit: ${code}${R}\n`);
+  const tmpDir = await mkdtemp(join(tmpdir(), "ash-review-"));
+  try {
+    out(`  ${CY}running agent…${R}\n`);
+    const { code, text: reviewText } = await runAgentCapture(buildReviewPrompt(pr, diff), tmpDir);
+    out(`  ${D}agent exit: ${code}${R}\n`);
 
-  if (!reviewText) {
-    out(`  ${RD}✗${R}  No review text produced. Skipping.\n`);
-    return;
+    if (!reviewText) {
+      out(`  ${RD}✗${R}  No review text produced. Skipping.\n`);
+      return false;
+    }
+    out(`\n  ${D}${reviewText.slice(0, 160)}…${R}\n\n`);
+
+    const review = await createPRReview(ASH_REPO, pr.number, reviewText, "COMMENT", token);
+    out(`  ${GR}✓${R}  Review posted: ${review.html_url}\n`);
+
+    await earnCredits({
+      myPub, privKey,
+      taskId: `github:review:${ASH_REPO}:${pr.number}:${review.id}`,
+      githubRef: `review:${ASH_REPO}:${pr.number}`,
+      action: "pr_review", amount: MINE_CREDITS.pr_review, url: review.html_url,
+    });
+    return true;
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
   }
-  out(`\n  ${D}${reviewText.slice(0, 160)}…${R}\n\n`);
-
-  const review = await createPRReview(ASH_REPO, pr.number, reviewText, "COMMENT", token);
-  out(`  ${GR}✓${R}  Review posted: ${review.html_url}\n`);
-
-  await earnCredits({
-    myPub, privKey,
-    taskId: `github:review:${ASH_REPO}:${pr.number}:${review.id}`,
-    githubRef: `review:${ASH_REPO}:${pr.number}`,
-    action: "pr_review", amount: MINE_CREDITS.pr_review, url: review.html_url,
-  });
 }
 
-async function doPrApprove(pr: GitHubPR, myReview: GitHubReview, token: string, myPub: string, privKey: import("node:crypto").KeyObject): Promise<void> {
+async function doPrApprove(pr: GitHubPR, myReview: GitHubReview, token: string, myPub: string, privKey: import("node:crypto").KeyObject): Promise<boolean> {
   out(`\n  ${B}[approve]${R} #${pr.number} ${pr.title}\n`);
   out(`  ${D}${"─".repeat(56)}${R}\n`);
 
   const diff = await fetchPRDiff(ASH_REPO, pr.number, token);
 
-  out(`  ${CY}running agent…${R}\n`);
-  const { code, text: approveText } = await runAgentCapture(buildApprovePrompt(pr, diff, myReview), process.cwd());
-  out(`  ${D}agent exit: ${code}${R}\n`);
+  const tmpDir = await mkdtemp(join(tmpdir(), "ash-approve-"));
+  try {
+    out(`  ${CY}running agent…${R}\n`);
+    const { code, text: approveText } = await runAgentCapture(buildApprovePrompt(pr, diff, myReview), tmpDir);
+    out(`  ${D}agent exit: ${code}${R}\n`);
 
-  const body = approveText || "Changes look good. Approving.";
-  const review = await createPRReview(ASH_REPO, pr.number, body, "APPROVE", token);
-  out(`  ${GR}✓${R}  Approved: ${review.html_url}\n`);
+    const body = approveText || "Changes look good. Approving.";
+    const review = await createPRReview(ASH_REPO, pr.number, body, "APPROVE", token);
+    out(`  ${GR}✓${R}  Approved: ${review.html_url}\n`);
 
-  await earnCredits({
-    myPub, privKey,
-    taskId: `github:approve:${ASH_REPO}:${pr.number}:${review.id}`,
-    githubRef: `approve:${ASH_REPO}:${pr.number}`,
-    action: "pr_approve", amount: MINE_CREDITS.pr_approve, url: review.html_url,
-  });
+    await earnCredits({
+      myPub, privKey,
+      taskId: `github:approve:${ASH_REPO}:${pr.number}:${review.id}`,
+      githubRef: `approve:${ASH_REPO}:${pr.number}`,
+      action: "pr_approve", amount: MINE_CREDITS.pr_approve, url: review.html_url,
+    });
+    return true;
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function doIssueCreate(existingIssues: GitHubIssue[], token: string, myPub: string, privKey: import("node:crypto").KeyObject): Promise<boolean> {
+  out(`\n  ${B}[issue]${R} analyzing codebase to find a new issue to open\n`);
+  out(`  ${D}${"─".repeat(56)}${R}\n`);
+
+  const tmpDir = await mkdtemp(join(tmpdir(), "ash-mine-issue-"));
+  try {
+    out(`  ${D}cloning Doheon/ash…${R}\n`);
+    await git(["clone", "--depth=1", `https://github.com/${ASH_REPO}.git`, tmpDir]);
+
+    out(`  ${CY}running agent…${R}\n`);
+    const { code, text } = await runAgentCapture(buildIssuePrompt(existingIssues), tmpDir);
+    out(`  ${D}agent exit: ${code}${R}\n`);
+
+    const parsed = parseIssueOutput(text);
+    if (!parsed) {
+      out(`  ${YL}⚠${R}  Could not parse issue output. Skipping.\n`);
+      return false;
+    }
+
+    const { title, label, body } = parsed;
+    out(`  ${D}opening issue: ${B}${title}${R}\n`);
+    const issue = await createIssue(ASH_REPO, title, body, [label], token);
+    out(`  ${GR}✓${R}  Issue created: ${issue.html_url}\n`);
+
+    await earnCredits({
+      myPub, privKey,
+      taskId: `github:issue:${ASH_REPO}:${issue.number}`,
+      githubRef: `issue:${ASH_REPO}:${issue.number}`,
+      action: "issue_create", amount: MINE_CREDITS.issue_create, url: issue.html_url,
+    });
+    return true;
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -514,13 +629,21 @@ async function runMine(opts: { count: number }): Promise<void> {
     out(`  ${D}selected action: ${B}${decision.action}${R}\n`);
 
     try {
+      let acted = false;
       if (decision.action === "pr_create") {
-        await doPrCreate(decision.issue, token, myPub, privKey, ghUser.login, ghEmail);
+        acted = await doPrCreate(decision.issue, token, myPub, privKey, ghUser.login, ghEmail);
       } else if (decision.action === "pr_review") {
-        await doPrReview(decision.pr, token, myPub, privKey);
+        acted = await doPrReview(decision.pr, token, myPub, privKey);
       } else if (decision.action === "pr_approve") {
-        await doPrApprove(decision.pr, decision.myReview, token, myPub, privKey);
+        acted = await doPrApprove(decision.pr, decision.myReview, token, myPub, privKey);
+      } else if (decision.action === "issue_create") {
+        acted = await doIssueCreate(decision.existingIssues, token, myPub, privKey);
+        // issue_create is a fallback action — stop after one attempt per run
+        // regardless of -n, to avoid issue spam.
+        if (acted) done++;
+        break;
       }
+      if (!acted) break;
       done++;
       out(`  ${D}${"─".repeat(56)}${R}\n`);
     } catch (err) {

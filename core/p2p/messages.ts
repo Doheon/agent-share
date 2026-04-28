@@ -8,7 +8,7 @@
 
 import type { EarnEvent } from "../../shared/events.ts";
 
-export type MineAction = "pr_create" | "pr_review" | "pr_approve";
+export type MineAction = "pr_create" | "pr_review" | "pr_approve" | "issue_create";
 
 export type P2PMessage =
   | {
