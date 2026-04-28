@@ -14,7 +14,7 @@
 import { ADMIN_PUBKEY } from "./constants.ts";
 import type { Model } from "./types.ts";
 
-export const POLICY_VERSION = 1 as const;
+export const POLICY_VERSION = 2 as const;
 
 /** Credits issued to a new user via an admin-signed `mint` with reason "signup". */
 export const SIGNUP_BONUS = 100;
@@ -32,12 +32,20 @@ export const FEE_BPS_MAX = 10_000;
 /** Account that receives the treasury fee share. Same as admin for now. */
 export const TREASURY_PUBKEY = ADMIN_PUBKEY;
 
-/** Canonical model registry. Used everywhere — do not duplicate. */
+/**
+ * Canonical model registry. Used everywhere — do not duplicate.
+ *
+ * Credit costs are proportional to real API pricing (base: Haiku = 8cr).
+ *   Haiku  : $0.80/$4 per MTok   → 1x   →  2 cr
+ *   Sonnet : $3/$15 per MTok     → ~4x  →  6 cr
+ *   Opus   : $15/$75 per MTok    → ~20x → 30 cr
+ *   Codex  : $1.10/$4.40 per MTok → ~1x →  2 cr
+ */
 export const MODELS: readonly Model[] = [
-  { tier: "claude-haiku",  display_name: "Claude Haiku",  credits: 8,  is_active: true },
-  { tier: "claude-sonnet", display_name: "Claude Sonnet", credits: 15, is_active: true },
-  { tier: "claude-opus",   display_name: "Claude Opus",   credits: 25, is_active: true },
-  { tier: "codex",         display_name: "Codex",         credits: 15, is_active: true },
+  { tier: "claude-haiku",  display_name: "Claude Haiku",  credits: 2,  is_active: true },
+  { tier: "claude-sonnet", display_name: "Claude Sonnet", credits: 6,  is_active: true },
+  { tier: "claude-opus",   display_name: "Claude Opus",   credits: 30, is_active: true },
+  { tier: "codex",         display_name: "Codex",         credits: 2,  is_active: true },
 ];
 
 /** Tier -> credit cost. Derived from MODELS so the two never drift. */
