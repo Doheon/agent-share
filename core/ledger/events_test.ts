@@ -276,13 +276,17 @@ describe("ledger events — replay hardening", () => {
     expect(await getLocalBalance(a.hex)).toBe(100);
   });
 
-  it("12: spend that would drive balance negative is skipped", async () => {
+  it("12: spend exceeding balance surfaces as negative (not silently skipped)", async () => {
     const a = newIdentity();
     const b = newIdentity();
-    // Balance starts at 0. A self-signed spend for 50 must not make it -50.
+    // Balance starts at 0. A self-signed spend for 50 drives it to -50 so
+    // the overspend is visible — the counterparty's earn cross-ref still
+    // credits +50 on their side, and swallowing the debit here would leave
+    // the ledger asymmetric. Acceptance gates (serve `balance > 0`) block
+    // any further activity while the owner is in the red.
     const spend = signedSpend(a, b, 50, "t12");
     await appendEvent(a.hex, spend);
-    expect(await getLocalBalance(a.hex)).toBe(0);
+    expect(await getLocalBalance(a.hex)).toBe(-50);
   });
 
   it("13: earn matches spend amount and task_id — amount mismatch rejects", async () => {

@@ -8,6 +8,7 @@
  */
 
 import { getCorestore } from "./store.ts";
+import { getPeerLedgerKey } from "./peer_keys.ts";
 import type { Event } from "../../shared/events.ts";
 import { eventWithoutSignature } from "../../shared/events.ts";
 import { ADMIN_PUBKEY, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
@@ -60,9 +61,13 @@ export async function appendEvent(ownerPubkeyHex: string, event: Event): Promise
  *
  * Any event that fails these checks is treated as malformed and skipped.
  */
+// `startingBalance` is the pre-applied admin-mint total for this owner;
+// injecting it here lets the spend underflow guard compare against the
+// real available balance instead of 0 (which would drop every spend that
+// lands before the first earn — see the /status vs /history mismatch bug).
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function replayBalance(core: any, ownerPubkeyHex: string): Promise<number> {
-  let balance = 0;
+async function replayBalance(core: any, ownerPubkeyHex: string, startingBalance = 0): Promise<number> {
+  let balance = startingBalance;
   const len: number = core.length;
   let ownerPubKey: ReturnType<typeof rawHexToPublicKey> | null = null;
   try {
@@ -83,7 +88,11 @@ async function replayBalance(core: any, ownerPubkeyHex: string): Promise<number>
           ownerPubKey,
         );
         if (!ok) continue;
-        if (balance - event.amount < 0) continue;
+        // Negative balance is allowed: it exposes fraudulent spends instead
+        // of silently masking them (a skipped spend still lets the
+        // counterparty claim the earn via cross-ref — so skipping creates an
+        // asymmetric ledger). Live `balance > 0` checks in serve.ts still
+        // gate task acceptance, so a negative owner can't keep spending.
         balance -= event.amount;
       } else if (event.type === "earn") {
         if (!(await verifyEarnCrossRef(event, ownerPubkeyHex, coreCache))) continue;
@@ -117,6 +126,34 @@ async function verifyEarnCrossRef(
   } catch {
     return false;
   }
+
+  // Mine EarnEvents (task_id starts with "github:") use a different trust model:
+  // the miner signs the event with their own key, and the counterparty
+  // (cosigner) signs only the task payload — there is no SpendEvent cross-ref.
+  if (earn.task_id.startsWith("github:")) {
+    let ownerPub;
+    try {
+      ownerPub = rawHexToPublicKey(ownerPubkeyHex);
+    } catch {
+      return false;
+    }
+    // earn.signature must be signed by the miner (log owner).
+    const earnSigOk = verifyEd25519(
+      canonicalStringify(eventWithoutSignature(earn)),
+      earn.signature,
+      ownerPub,
+    );
+    if (!earnSigOk) return false;
+    // counterparty_task_signature must be signed by the cosigner over the task payload.
+    const taskPayload = canonicalStringify({
+      task_id: earn.task_id,
+      amount: earn.amount,
+      claimant_pubkey: ownerPubkeyHex,
+      action: "earn",
+    });
+    return verifyEd25519(taskPayload, earn.counterparty_task_signature, counterpartyPub);
+  }
+
   const earnSigOk = verifyEd25519(
     canonicalStringify(eventWithoutSignature(earn)),
     earn.signature,
@@ -125,10 +162,30 @@ async function verifyEarnCrossRef(
   if (!earnSigOk) return false;
 
   // Cross-ref: find a matching signed SpendEvent on the counterparty's log.
+  //
+  // The counterparty lives on another machine, so their Hypercore key is not
+  // derivable from their pubkey — `getUserCore(counterparty)` on our side
+  // just creates an empty local stub. Peer messages (peer:info /
+  // task:announce) carry the real hex key; we persist it in peer_keys.ts and
+  // open the replicated core here. Fall back to the name-based lookup when
+  // we have no mapping yet (fresh peer, or unit-test scenarios where both
+  // logs share a mocked store).
   let cpCore = coreCache.get(earn.counterparty_pubkey);
   if (!cpCore) {
     try {
-      cpCore = await getUserCore(earn.counterparty_pubkey);
+      const mappedKey = await getPeerLedgerKey(earn.counterparty_pubkey);
+      if (mappedKey) {
+        const store = await getCorestore();
+        cpCore = store.get(Buffer.from(mappedKey, "hex"), { valueEncoding: "utf-8" });
+        await cpCore.ready();
+        // Give replication a brief window to catch up before we read.
+        await Promise.race([
+          Promise.resolve(cpCore.update?.()).catch(() => undefined),
+          new Promise<void>((r) => setTimeout(r, 2000)),
+        ]);
+      } else {
+        cpCore = await getUserCore(earn.counterparty_pubkey);
+      }
       coreCache.set(earn.counterparty_pubkey, cpCore);
     } catch {
       return false;
@@ -138,7 +195,12 @@ async function verifyEarnCrossRef(
   if (cpLen === 0) return false;
   for (let j = 0; j < cpLen; j++) {
     try {
-      const raw = await cpCore.get(j) as string;
+      // `wait: false` returns null for blocks we don't have locally instead
+      // of blocking forever on replication. Balance replay runs without a
+      // swarm (e.g. `ash status`), so a remote block is never going to
+      // arrive here — skip it rather than hang.
+      const raw = await cpCore.get(j, { wait: false }) as string | null;
+      if (raw == null) continue;
       const ev = JSON.parse(raw) as Event;
       if (
         ev.type === "spend" &&
@@ -218,10 +280,9 @@ async function replayAdminMints(recipientPubkey: string): Promise<number> {
 
 /** Returns the balance for the given owner by replaying their local Hypercore. */
 export async function getLocalBalance(ownerPubkeyHex: string): Promise<number> {
-  const core = await getUserCore(ownerPubkeyHex);
-  const base = await replayBalance(core, ownerPubkeyHex);
   const mints = await replayAdminMints(ownerPubkeyHex);
-  return base + mints;
+  const core = await getUserCore(ownerPubkeyHex);
+  return replayBalance(core, ownerPubkeyHex, mints);
 }
 
 /**
@@ -256,9 +317,8 @@ export async function getRemoteBalance(
     new Promise<void>((r) => setTimeout(r, timeoutMs)),
   ]);
 
-  const base = await replayBalance(core, recipientPubkey);
   const mints = await replayAdminMints(recipientPubkey);
-  return base + mints;
+  return replayBalance(core, recipientPubkey, mints);
 }
 
 /** Returns all raw events from the owner's own Hypercore (earn/spend). */
