@@ -28,7 +28,9 @@ import {
   importEd25519PrivatePem,
   importEd25519PublicPem,
   publicKeyToRawHex,
+  rawHexToPublicKey,
   signEd25519,
+  verifyEd25519,
 } from "../../core/crypto/ed25519.ts";
 import { canonicalStringify } from "../../shared/canonical.ts";
 import { eventWithoutSignature, type Event, type MintEvent } from "../../shared/events.ts";
@@ -196,14 +198,22 @@ async function loadMintedSignups(): Promise<Set<string>> {
 
 /**
  * Opens a peer's Hypercore by its published ledger key, waits briefly for
- * replication, and returns true iff a SignupEvent signed by `pubkey` is
- * present.
+ * replication, and returns true iff it contains a SignupEvent whose
+ * `ed25519_public_key` matches `pubkey` AND whose signature verifies against
+ * that pubkey. The signature check blocks the "A puts a forged SignupEvent
+ * claiming ed25519_public_key=V into A's own core" griefing vector.
  */
 async function peerHasSignupEvent(
   pubkey: string,
   ledgerKeyHex: string,
   timeoutMs = 5000,
 ): Promise<boolean> {
+  let claimedPub;
+  try {
+    claimedPub = rawHexToPublicKey(pubkey);
+  } catch {
+    return false;
+  }
   try {
     const store = await getCorestore();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -222,7 +232,13 @@ async function peerHasSignupEvent(
         const raw = await core.get(i) as string;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const ev = JSON.parse(raw) as any;
-        if (ev.type === "signup" && ev.ed25519_public_key === pubkey) return true;
+        if (ev.type !== "signup" || ev.ed25519_public_key !== pubkey) continue;
+        const sigOk = verifyEd25519(
+          canonicalStringify(eventWithoutSignature(ev)),
+          ev.signature,
+          claimedPub,
+        );
+        if (sigOk) return true;
       } catch { /* skip malformed */ }
     }
     return false;
@@ -312,27 +328,15 @@ adminCommand.addCommand(
       );
 
       const swarm = new AshSwarm();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let repSwarm: any = null;
-      try {
-        await swarm.join(adminPriv, ADMIN_PUBKEY);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { default: Hyperswarm } = (await import("hyperswarm")) as any;
-        repSwarm = new Hyperswarm();
-        const store = await getCorestore();
-        repSwarm.join(LEDGER_TOPIC);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        repSwarm.on("connection", (conn: any) => store.replicate(conn));
-      } catch (err) {
-        console.error(`\n  Failed to join network: ${(err as Error).message}\n`);
-        process.exit(1);
-      }
-
-      swarm.onMessage(async (_peer, msg) => {
+      // Register the handler BEFORE join so we don't drop peer:info messages
+      // from peers that connect during the swarm's discovery ramp-up. The
+      // handshake-verified identity (_peer.pubkey) is used as the mint target
+      // — msg.pubkey is self-declared and cannot be trusted on its own.
+      swarm.onMessage(async (peer, msg) => {
         if (msg.type !== "peer:info") return;
-        const pubkey = msg.pubkey;
+        const pubkey = peer.pubkey;
         const ledgerKey = msg.ledger_core_key;
-        if (!pubkey || !ledgerKey) return;
+        if (!ledgerKey) return;
         if (pubkey === ADMIN_PUBKEY) return;
         if (minted.has(pubkey) || inFlight.has(pubkey)) return;
         inFlight.add(pubkey);
@@ -348,6 +352,23 @@ adminCommand.addCommand(
           inFlight.delete(pubkey);
         }
       });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let repSwarm: any = null;
+      try {
+        await swarm.join(adminPriv, ADMIN_PUBKEY);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { default: Hyperswarm } = (await import("hyperswarm")) as any;
+        repSwarm = new Hyperswarm();
+        const store = await getCorestore();
+        repSwarm.join(LEDGER_TOPIC);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        repSwarm.on("connection", (conn: any) => store.replicate(conn));
+      } catch (err) {
+        console.error(`\n  Failed to join network: ${(err as Error).message}\n`);
+        await swarm.destroy().catch(() => {});
+        process.exit(1);
+      }
 
       const shutdown = async (): Promise<void> => {
         console.log("\n  shutting down…");
