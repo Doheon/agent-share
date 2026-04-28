@@ -5,6 +5,7 @@
 import { program, Command } from "commander";
 import { serveCommand } from "./commands/serve.ts";
 import { initCommand } from "./commands/init.ts";
+import { loginCommand } from "./commands/login.ts";
 import { setCommand } from "./commands/set.ts";
 import { setupCommand } from "./commands/setup.ts";
 import { mineCommand } from "./commands/mine.ts";
@@ -16,6 +17,7 @@ import { hasIdentity, loadConfig, loadModelTier } from "./client.ts";
 import { ensureInitialized, NotInitializedError } from "./guard.ts";
 import { getLocalBalance, closeLocalStore } from "./p2p_state.ts";
 import { CLIENT_VERSION } from "../shared/protocol.ts";
+import { getAgentStatus, type AgentStatus } from "./commands/init.ts";
 
 function exitNotInitialized(err: NotInitializedError): never {
   console.error(`\nerror: ${err.reason}\n  → ${err.hint}\n`);
@@ -38,6 +40,7 @@ program
   });
 
 program.addCommand(initCommand);
+program.addCommand(loginCommand);
 program.addCommand(serveCommand);
 program.addCommand(setCommand);
 program.addCommand(setupCommand);
@@ -63,9 +66,19 @@ program.addCommand(
         }
         const balance = await getLocalBalance(cfg.pubkey);
         const modelTier = await loadModelTier();
+        const [claudeStatus, codexStatus] = await Promise.all([
+          getAgentStatus("claude"),
+          getAgentStatus("codex"),
+        ]);
+        const statusLabel = (s: AgentStatus) =>
+          s === "valid"          ? "✓ ready" :
+          s === "expired"        ? "✗ token expired   (run: ash login)" :
+                                   "— not configured  (run: ash login)";
         console.log(
           `\n  ${cfg.username}  ·  ${balance.balance} credits  ·  ${modelTier}\n` +
-          `  pubkey: ${cfg.pubkey}\n`,
+          `  pubkey: ${cfg.pubkey}\n\n` +
+          `  claude code:  ${statusLabel(claudeStatus)}\n` +
+          `  codex:        ${statusLabel(codexStatus)}\n`,
         );
       } catch (err) {
         console.error(`\nerror: ${(err as Error).message}\n`);

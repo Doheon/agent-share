@@ -39,18 +39,20 @@ import {
 import { getEvents } from "../../core/ledger/events.ts";
 
 
-const AGENT_INFO: Record<AgentType, { name: string; credDir: string; installHint: string; loginCmd: string }> = {
+const AGENT_INFO: Record<AgentType, { name: string; credDir: string; installHint: string; loginCmd: string; statusCmd: string[] }> = {
   claude: {
     name: "Claude Code",
     credDir: `${homedir()}/.claude`,
     installHint: "npm install -g @anthropic-ai/claude-code",
     loginCmd: "claude auth login",
+    statusCmd: ["claude", "auth", "status"],
   },
   codex: {
     name: "Codex",
     credDir: `${homedir()}/.codex`,
     installHint: "npm install -g @openai/codex",
     loginCmd: "codex login",
+    statusCmd: ["codex", "login", "status"],
   },
 };
 
@@ -63,11 +65,10 @@ async function isBinaryInstalled(bin: string): Promise<boolean> {
 
 async function isAgentLoggedIn(agent: AgentType): Promise<boolean> {
   try {
-    const proc = spawn([agent, "auth", "status"], { stdout: "ignore", stderr: "ignore" });
-    return (await proc.exited) === 0;
-  } catch {
-    try { return (await stat(AGENT_INFO[agent].credDir)).isDirectory(); } catch { return false; }
-  }
+    const proc = spawn(AGENT_INFO[agent].statusCmd, { stdout: "ignore", stderr: "ignore" });
+    if ((await proc.exited) === 0) return true;
+  } catch { /* fall through to credDir check */ }
+  try { return (await stat(AGENT_INFO[agent].credDir)).isDirectory(); } catch { return false; }
 }
 
 // Verifies the credentials actually used by the sandbox, not the host CLI
@@ -185,6 +186,49 @@ export async function refreshAgentCredentials(agent: AgentType): Promise<void> {
     }
     console.log("  Session created.");
   }
+}
+
+export type AgentStatus = "valid" | "expired" | "not_configured";
+
+export async function getAgentStatus(agent: AgentType): Promise<AgentStatus> {
+  if (agent === "claude") {
+    const token = await loadAgentToken();
+    if (!token || !token.startsWith("sk-ant-")) return "not_configured";
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/models", {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "oauth-2025-04-20",
+        },
+        signal: controller.signal,
+      });
+      if (res.status === 401 || res.status === 403) return "expired";
+      return "valid";
+    } catch {
+      return "valid"; // network error — don't report as expired
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (agent === "codex") {
+    const codexSessionDir = `${ASH_DIR}/codex-session`;
+    try { await stat(`${codexSessionDir}/.codex/auth.json`); } catch { return "not_configured"; }
+    const safeEnv: Record<string, string> = {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      HOME: codexSessionDir,
+    };
+    try {
+      const proc = spawn(["codex", "login", "status"], {
+        stdout: "ignore", stderr: "ignore", env: safeEnv,
+      });
+      return (await proc.exited) === 0 ? "valid" : "expired";
+    } catch { return "valid"; }
+  }
+  return "not_configured";
 }
 
 export async function selectAndSaveAgent(): Promise<void> {
