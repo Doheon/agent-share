@@ -10,6 +10,7 @@ import { loadConfig, loadIdentity } from "../client.ts";
 import { getLedgerCoreKey, getRemotePeerBalance, closeLocalStore } from "../p2p_state.ts";
 import { AshSwarm } from "../../core/p2p/swarm.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
+import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
 import { LEDGER_TOPIC } from "../../shared/constants.ts";
 import type { P2PMessage } from "../../core/p2p/messages.ts";
 
@@ -55,6 +56,7 @@ export const peersCommand = new Command("peers")
     swarm.onMessage((_peer, msg: P2PMessage) => {
       if (msg.type === "peer:info") {
         if (msg.pubkey === myPub) return;
+        registerPeerLedgerKey(msg.pubkey, msg.ledger_core_key).catch(() => undefined);
         discovered.set(msg.pubkey, {
           ledgerKey: msg.ledger_core_key,
           model: msg.model_tier,

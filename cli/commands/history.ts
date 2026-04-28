@@ -8,7 +8,7 @@
 import { Command } from "commander";
 import { loadConfig } from "../client.ts";
 import { getEvents, getAdminMintsFor } from "../../core/ledger/events.ts";
-import { closeLocalStore } from "../p2p_state.ts";
+import { closeLocalStore, getLocalBalance } from "../p2p_state.ts";
 import type { EarnEvent, SpendEvent, MintEvent } from "../../shared/events.ts";
 
 export const historyCommand = new Command("history")
@@ -43,24 +43,24 @@ export const historyCommand = new Command("history")
         return;
       }
 
-      let balance = 0;
       for (const evt of all) {
         const ts = evt.timestamp.slice(0, 19).replace("T", " ");
         if (evt.type === "earn") {
           const e = evt as EarnEvent;
-          balance += e.amount;
           console.log(`  ${ts}  earn   +${String(e.amount).padStart(4)} cr  from ${e.counterparty_pubkey.slice(0, 8)}…`);
         } else if (evt.type === "spend") {
           const e = evt as SpendEvent;
-          balance -= e.amount;
           console.log(`  ${ts}  spend  -${String(e.amount).padStart(4)} cr  to   ${e.counterparty_pubkey.slice(0, 8)}…`);
         } else if (evt.type === "mint") {
           const e = evt as MintEvent;
-          balance += e.amount;
           console.log(`  ${ts}  mint   +${String(e.amount).padStart(4)} cr  admin  (${e.reason})`);
         }
       }
 
+      // Validated balance via the same path as `ash status` / requester
+      // balance checks — raw event sum can diverge because unverified earns,
+      // bad-signature spends, and underflow-skipped spends are dropped here.
+      const balance = (await getLocalBalance(pubkey)).balance;
       console.log(`\n  balance: ${balance} cr\n`);
     } catch (err) {
       console.error(`\nerror: ${(err as Error).message}\n`);

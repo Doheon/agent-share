@@ -40,6 +40,7 @@ import {
 } from "../p2p_state.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
 import { getEvents, getAdminMintsFor } from "../../core/ledger/events.ts";
+import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
 import { LEDGER_TOPIC } from "../../shared/constants.ts";
 import { splitFee } from "../../shared/policy.ts";
 import { AshSwarm, type SwarmPeer } from "../../core/p2p/swarm.ts";
@@ -238,6 +239,10 @@ function ChatApp({
       let nextNonce: number;
       try { nextNonce = await getNextNonce(userId); } catch { return; }
 
+      // Cache the requester's ledger core key so replay can verify our earn.
+      await registerPeerLedgerKey(announce.requester_pubkey, announce.requester_ledger_key)
+        .catch(() => undefined);
+
       peer.send({
         type: "task:claim",
         task_id: announce.task_id,
@@ -271,15 +276,14 @@ function ChatApp({
 
       try {
         await ensureAgentLoggedIn(state.agent);
-        await processTask(state.active, userId, state.modelTier, serveLogger);
+        const { earned } = await processTask(state.active, userId, state.modelTier, serveLogger);
         state.completed += 1;
         const bal = (await getLocalBalance(userId)).balance;
         setBalance(bal);
         setServed((n) => n + 1);
-        const credits = models.find((m) => m.tier === state.modelTier)?.credits ?? 0;
         addMsg(
-          `  ⎿ [${idx}/${cap}] task from ${who}…  → +${credits}cr  (balance: ${bal}cr)`,
-          credits > 0 ? "#7cd38a" : "#6b6b6b",
+          `  ⎿ [${idx}/${cap}] task from ${who}…  → +${earned}cr  (balance: ${bal}cr)`,
+          earned > 0 ? "#7cd38a" : "#6b6b6b",
         );
       } catch (err) {
         if (err instanceof AuthError) {
@@ -308,6 +312,13 @@ function ChatApp({
     };
 
     swarm.onMessage(async (peer, msg) => {
+      // Cache any ledger core key the peer advertises so future cross-ref
+      // at balance replay can open their real Hypercore.
+      if (msg.type === "peer:info") {
+        registerPeerLedgerKey(msg.pubkey, msg.ledger_core_key).catch(() => undefined);
+        return;
+      }
+
       // ── Serve mode (acceptor) ──────────────────────────────────────────
       const sm = serveModeRef.current;
       if (sm) {
@@ -807,20 +818,19 @@ function ChatApp({
           addMsg("no events", "#888888");
           break;
         }
-        let bal = 0;
         for (const evt of all) {
           const ts = evt.timestamp.slice(0, 19).replace("T", " ");
           if (evt.type === "earn") {
-            bal += evt.amount;
             addMsg(`  ${ts}  earn   +${String(evt.amount).padStart(4)} cr  from ${evt.counterparty_pubkey.slice(0, 8)}…`, "#7cd38a");
           } else if (evt.type === "spend") {
-            bal -= evt.amount;
             addMsg(`  ${ts}  spend  -${String(evt.amount).padStart(4)} cr  to   ${evt.counterparty_pubkey.slice(0, 8)}…`, "#e3bd5a");
           } else if (evt.type === "mint") {
-            bal += evt.amount;
             addMsg(`  ${ts}  mint   +${String(evt.amount).padStart(4)} cr  admin  (${evt.reason})`, "#88ccff");
           }
         }
+        // Same validated balance path as /status, `ash status`, and the
+        // requester-credit check in serve — raw event sum can diverge.
+        const bal = (await getLocalBalance(target)).balance;
         addMsg(`balance: ${bal} cr`, "#88ff88");
         break;
       }
