@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Box, Text, useInput } from "ink";
-import { saveConfig, saveAgentToken, saveAgent } from "../client.ts";
+import { loadConfig, saveConfig, saveAgentToken, saveAgent } from "../client.ts";
 import { fetchCurrentUser } from "../../core/github/client.ts";
-import { validateAgentCredentials, isBinaryInstalled } from "./init.ts";
+import { validateAgentCredentials, isBinaryInstalled, getAgentStatus } from "./init.ts";
 import { GITHUB_CLIENT_ID } from "../../shared/constants.ts";
 import { spawn } from "../../core/util/spawn.ts";
 
@@ -29,11 +29,46 @@ const PROVIDERS = [
   { id: "codex"  as const, label: "Codex",       desc: "verify ash login codex completed" },
 ];
 
+type ProviderStatus = { loading: boolean; text: string; ok: boolean };
+const LOADING_STATUS: ProviderStatus = { loading: true, text: "", ok: false };
+
 export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
   const [step, setStep] = useState<Step>({ kind: "provider", idx: 0 });
   const mountedRef = useRef(true);
+  const [statuses, setStatuses] = useState<Record<"github" | "claude" | "codex", ProviderStatus>>({
+    github: LOADING_STATUS,
+    claude: LOADING_STATUS,
+    codex:  LOADING_STATUS,
+  });
 
   useEffect(() => () => { mountedRef.current = false; }, []);
+
+  // Load current login status for all providers on mount.
+  useEffect(() => {
+    const setStatus = (key: "github" | "claude" | "codex", s: Omit<ProviderStatus, "loading">) => {
+      if (!mountedRef.current) return;
+      setStatuses((prev) => ({ ...prev, [key]: { loading: false, ...s } }));
+    };
+
+    loadConfig().then(async (cfg) => {
+      if (!cfg.githubToken) { setStatus("github", { text: "—", ok: false }); return; }
+      fetchCurrentUser(cfg.githubToken)
+        .then((u) => setStatus("github", { text: `@${u.login}`, ok: true }))
+        .catch(() => setStatus("github", { text: "token invalid", ok: false }));
+    }).catch(() => setStatus("github", { text: "—", ok: false }));
+
+    getAgentStatus("claude").then((s) => {
+      if (s === "valid")          setStatus("claude", { text: "✓ valid",        ok: true });
+      else if (s === "expired")   setStatus("claude", { text: "⚠ expired",      ok: false });
+      else                        setStatus("claude", { text: "—",              ok: false });
+    }).catch(() => setStatus("claude", { text: "—", ok: false }));
+
+    getAgentStatus("codex").then((s) => {
+      if (s === "valid")          setStatus("codex", { text: "✓ valid",         ok: true });
+      else if (s === "expired")   setStatus("codex", { text: "⚠ expired",       ok: false });
+      else                        setStatus("codex", { text: "—",               ok: false });
+    }).catch(() => setStatus("codex", { text: "—", ok: false }));
+  }, []);
 
   // Derived stable keys for effects.
   const githubPhase      = step.kind === "github" ? step.phase : null;
@@ -269,16 +304,20 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
     return (
       <Box flexDirection="column" paddingX={2}>
         <Text color="#888888">{"─── login ───────────────────────────────"}</Text>
-        {PROVIDERS.map((p, i) => (
-          <Box key={p.id}>
-            <Text
-              color={i === step.idx ? "#ffffff" : "#888888"}
-              backgroundColor={i === step.idx ? "#2a2a2a" : undefined}
-            >
-              {`  ${i === step.idx ? "●" : " "} ${p.label.padEnd(14)}  ${p.desc}`}
-            </Text>
-          </Box>
-        ))}
+        {PROVIDERS.map((p, i) => {
+          const st = statuses[p.id];
+          const active = i === step.idx;
+          return (
+            <Box key={p.id} backgroundColor={active ? "#2a2a2a" : undefined}>
+              <Text color={active ? "#ffffff" : "#888888"}>
+                {`  ${active ? "●" : " "} ${p.label.padEnd(14)}  `}
+              </Text>
+              {st.loading
+                ? <Text color="#555555">{"checking…"}</Text>
+                : <Text color={st.ok ? "#7cd38a" : "#555555"}>{st.text}</Text>}
+            </Box>
+          );
+        })}
         <Text color="#555555">{"    ↑↓ navigate · enter select · esc cancel"}</Text>
       </Box>
     );
