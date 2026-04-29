@@ -48,7 +48,8 @@ import type { P2PMessage } from "../../core/p2p/messages.ts";
 import type { Model } from "../../shared/types.ts";
 import { DEFAULT_MODEL_TIER, modelToAgent } from "../../shared/types.ts";
 import { CLIENT_VERSION } from "../../shared/protocol.ts";
-import { validateAgentCredentials, ensureAgentLoggedIn } from "./init.ts";
+import { validateAgentCredentials, ensureAgentLoggedIn, getAgentStatus } from "./init.ts";
+import { fetchCurrentUser } from "../../core/github/client.ts";
 import { AuthError, processTask, type ActiveTask } from "./serve.ts";
 import { LoginScreen, type LoginResult } from "./login_screen.tsx";
 
@@ -800,8 +801,20 @@ function ChatApp({
         setMsgs([]);
         break;
       case "status": {
-        const b = (await getLocalBalance(userId)).balance;
+        const [{ balance: b }, cfg, claudeStatus, codexStatus] = await Promise.all([
+          getLocalBalance(userId),
+          loadConfig(),
+          getAgentStatus("claude"),
+          getAgentStatus("codex"),
+        ]);
         setBalance(b);
+        let githubStr = "—";
+        if (cfg.githubToken) {
+          const u = await fetchCurrentUser(cfg.githubToken).catch(() => null);
+          githubStr = u ? `@${u.login}` : "token invalid";
+        }
+        const authStr = (s: string) =>
+          s === "valid" ? "✓ valid" : s === "expired" ? "⚠ expired" : "—";
         addMsgs([
           `user:    ${username}`,
           `model:   ${labelFor(currentModelRef.current)}  (${creditsFor(currentModelRef.current)}cr/task)`,
@@ -809,6 +822,9 @@ function ChatApp({
           `served:  ${served} tasks`,
           `peers:   ${swarm.getPeers().length}`,
           `cwd:     ${process.cwd().replace(homedir(), "~")}`,
+          `github:  ${githubStr}`,
+          `claude:  ${authStr(claudeStatus)}`,
+          `codex:   ${authStr(codexStatus)}`,
         ], "#88ccff");
         break;
       }
