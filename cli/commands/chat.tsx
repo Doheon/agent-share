@@ -757,6 +757,7 @@ function ChatApp({
       return;
     }
     if (!input.startsWith("/")) { await runRequest(input); return; }
+    addMsg(`❯ ${input}`, "#555555");
     const [cmd, ...args] = input.slice(1).trim().split(/\s+/);
     switch (cmd.toLowerCase()) {
       case "q": case "quit": case "exit": doExit(); break;
