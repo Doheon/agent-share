@@ -714,7 +714,7 @@ function ChatApp({
     const agent = modelToAgent(modelTier);
 
     if (!(await validateAgentCredentials(agent))) {
-      addMsg(`  ⎿ ${agent} credentials missing or expired. Quit and run \`ash init\` to refresh.`, "#ff8888");
+      addMsg(`  ⎿ ${agent} credentials missing or expired — run /login to refresh.`, "#ff8888");
       return;
     }
 
