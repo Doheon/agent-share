@@ -50,6 +50,7 @@ import { DEFAULT_MODEL_TIER, modelToAgent } from "../../shared/types.ts";
 import { CLIENT_VERSION } from "../../shared/protocol.ts";
 import { validateAgentCredentials, ensureAgentLoggedIn } from "./init.ts";
 import { AuthError, processTask, type ActiveTask } from "./serve.ts";
+import { LoginScreen, type LoginResult } from "./login_screen.tsx";
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const COMMANDS = [
@@ -59,6 +60,7 @@ const COMMANDS = [
   { cmd: "status",  desc: "show account info" },
   { cmd: "peers",   desc: "list connected peers" },
   { cmd: "history", desc: "show event history  (e.g. /history <pubkey>)" },
+  { cmd: "login",   desc: "log in to GitHub / Claude / Codex" },
   { cmd: "clear",   desc: "clear chat scrollback" },
   { cmd: "help",    desc: "show available commands" },
   { cmd: "quit",    desc: "exit" },
@@ -153,6 +155,7 @@ function ChatApp({
   const [menuIdx, setMenuIdx] = useState(0);
   const [pickerActive, setPickerActive] = useState(false);
   const [pickerIdx, setPickerIdx] = useState(0);
+  const [loginActive, setLoginActive] = useState(false);
 
   const [currentModel, setCurrentModelState] = useState(initialModel);
   const [balance, setBalance] = useState(initialBalance);
@@ -766,6 +769,7 @@ function ChatApp({
           "  /status           show account info",
           "  /peers            list connected peers",
           "  /history          show event history",
+          "  /login            log in to GitHub / Claude / Codex",
           "  /clear            clear chat scrollback",
           "  /quit             exit",
         ], "#888888");
@@ -860,11 +864,25 @@ function ChatApp({
         }
         break;
       }
+      case "login": {
+        if (pendingRef.current) {
+          addMsg("  ⎿ task in flight; wait for it to finish.", "#e3bd5a");
+          break;
+        }
+        if (serveModeRef.current) {
+          addMsg("  ⎿ stop serve mode (esc) before logging in.", "#e3bd5a");
+          break;
+        }
+        setLoginActive(true);
+        break;
+      }
       default: addMsg(`Unknown command: /${cmd}  (try /help)`, "#ff8888");
     }
   }, [addMsg, addMsgs, doExit, runRequest, enterServeMode, userId, username, swarm, models]);
 
   useInput((input, key) => {
+    // Must remain the first check — LoginScreen's useInput fires after this one
+    // (registration order), so Ctrl+C exits the app even while login is active.
     if (key.ctrl && input === "c") { doExit(); return; }
 
     // Serve mode: Esc requests stop (finish-then-exit if a task is running);
@@ -886,6 +904,9 @@ function ChatApp({
       }
       return;
     }
+
+    // LoginScreen owns its own useInput; prevent chat from also processing keys.
+    if (loginActive) return;
 
     // Picker mode
     if (pickerActive) {
@@ -1035,7 +1056,7 @@ function ChatApp({
   //   pendingMsg (0-1) + separator(1) + input ← cursor here + separator(1) + menu/picker + status
   const pendingLines = pendingMsg ? 1 : 0;
   const cursorDisplayX = stringWidth(inputVal.slice(0, cursorPos));
-  if (!serveDisplay) {
+  if (!serveDisplay && !loginActive) {
     setCursorPosition({ x: 3 + cursorDisplayX, y: pendingLines + 1 });
   } else {
     setCursorPosition({ x: 0, y: 0 });
@@ -1103,8 +1124,18 @@ function ChatApp({
           );
         })()}
 
+        {loginActive && (
+          <LoginScreen
+            onClose={(result: LoginResult | null) => {
+              setLoginActive(false);
+              if (!result) { addMsg("  ⎿ login cancelled.", "#888888"); return; }
+              addMsg(`  ⎿ logged in: ${result.label}`, "#7cd38a");
+            }}
+          />
+        )}
+
         {/* Input (or serve-mode status line in its place) */}
-        {serveDisplay ? (() => {
+        {!loginActive && (serveDisplay ? (() => {
           let runningPart: string;
           if (serveDisplay.busy) {
             const sm = serveModeRef.current;
@@ -1151,10 +1182,10 @@ function ChatApp({
             </Box>
             <Text color="#888888">{"━".repeat(termWidth)}</Text>
           </Box>
-        )}
+        ))}
 
         {/* Slash-command menu (below input) */}
-        {!serveDisplay && menuItems.length > 0 && !pickerActive && (
+        {!loginActive && !serveDisplay && menuItems.length > 0 && !pickerActive && (
           <Box flexDirection="column" paddingX={2}>
             {menuItems.map((c, i) => (
               <Box key={c.cmd}>
@@ -1168,7 +1199,7 @@ function ChatApp({
         )}
 
         {/* Model picker (below input) */}
-        {!serveDisplay && pickerActive && (
+        {!loginActive && !serveDisplay && pickerActive && (
           <Box flexDirection="column" paddingX={2}>
             {models.slice(0, 11).map((m, i) => (
               <Box key={m.tier}>

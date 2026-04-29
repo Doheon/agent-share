@@ -56,7 +56,7 @@ const AGENT_INFO: Record<AgentType, { name: string; credDir: string; installHint
   },
 };
 
-async function isBinaryInstalled(bin: string): Promise<boolean> {
+export async function isBinaryInstalled(bin: string): Promise<boolean> {
   try {
     const proc = spawn([bin, "--version"], { stdout: "ignore", stderr: "ignore" });
     return (await proc.exited) === 0;

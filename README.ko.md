@@ -136,7 +136,7 @@ ash status
 | `ash serve --allow-self` | 자기 작업도 포함 (테스트용) |
 | `ash status` | 신원 및 잔액 표시 |
 | `ash set <모델>` | 모델 티어 변경 (예: `claude-sonnet`) |
-| `ash login` | 세션 갱신 (필요시) |
+| `ash login` | 세션 갱신 (필요시); TUI 안에서 `/login`으로도 사용 가능 |
 | `ash setup` | 환경 재점검 |
 | `ash mine` | GitHub 기여로 크레딧 획득 |
 

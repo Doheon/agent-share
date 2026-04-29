@@ -136,7 +136,7 @@ Shows your username, credit balance, and configured model.
 | `ash serve --allow-self` | Include your own tasks (testing) |
 | `ash status` | Show identity and balance |
 | `ash set <model>` | Set model tier (e.g., `claude-sonnet`) |
-| `ash login` | Refresh session (if needed) |
+| `ash login` | Refresh session (if needed); also available as `/login` inside the TUI |
 | `ash setup` | Re-run environment checks |
 | `ash mine` | Earn credits from GitHub contributions |
 
