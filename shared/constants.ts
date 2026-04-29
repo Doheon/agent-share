@@ -10,6 +10,11 @@ export const ADMIN_PUBKEY = "156ad2c34700afcdcfb067ab34d30440e2590baa2c12c9590c5
 // Run 'ash admin pubkey' after keygen to get this value.
 export const ADMIN_LEDGER_KEY = "372ef059418a318ac5ad8c02db159693352de909a07283f3fa9fe319740937a3";
 
+// GitHub OAuth App client ID (public — not a secret).
+// Used for the Device Authorization Flow in `ash login`.
+// Registered at github.com/settings/developers under the Doheon/ash app.
+export const GITHUB_CLIENT_ID = "Ov23li8AxqEuRlToUyk4";
+
 // Hyperswarm topic for the global ledger replication network.
 // All ash peers join this topic so each user's event Hypercore
 // is replicated to all connected peers.

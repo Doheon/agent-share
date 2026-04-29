@@ -3,6 +3,8 @@ import { Box, Text, useInput } from "ink";
 import { saveConfig, saveAgentToken, saveAgent } from "../client.ts";
 import { fetchCurrentUser } from "../../core/github/client.ts";
 import { validateAgentCredentials, isBinaryInstalled } from "./init.ts";
+import { GITHUB_CLIENT_ID } from "../../shared/constants.ts";
+import { spawn } from "../../core/util/spawn.ts";
 
 export interface LoginResult {
   kind: "github" | "claude" | "codex";
@@ -15,12 +17,14 @@ export interface LoginScreenProps {
 
 type Step =
   | { kind: "provider"; idx: number }
-  | { kind: "github"; buf: string; cursorPos: number; busy: boolean; error?: string }
+  | { kind: "github"; phase: "init" }
+  | { kind: "github"; phase: "waiting"; userCode: string; verificationUri: string; deviceCode: string; interval: number }
+  | { kind: "github"; phase: "error"; error: string }
   | { kind: "claude"; buf: string; cursorPos: number; busy: boolean; error?: string; hasBin: boolean | null }
   | { kind: "codex"; busy: boolean; error?: string; hasBin: boolean | null };
 
 const PROVIDERS = [
-  { id: "github" as const, label: "GitHub",      desc: "add a personal access token" },
+  { id: "github" as const, label: "GitHub",      desc: "authorize via browser (Device Flow)" },
   { id: "claude" as const, label: "Claude Code", desc: "paste an sk-ant-… long-lived token" },
   { id: "codex"  as const, label: "Codex",       desc: "verify ash login codex completed" },
 ];
@@ -31,22 +35,103 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
 
   useEffect(() => () => { mountedRef.current = false; }, []);
 
-  // Probe for binary installation with cleanup so stale results are dropped.
+  // Derived stable keys for effects.
+  const githubPhase      = step.kind === "github" ? step.phase : null;
+  const githubDeviceCode = step.kind === "github" && step.phase === "waiting" ? step.deviceCode : null;
+  const githubInterval   = step.kind === "github" && step.phase === "waiting" ? step.interval : 5;
+  const binKind          = step.kind === "claude" || step.kind === "codex" ? step.kind : null;
+  const hasBin           = step.kind === "claude" || step.kind === "codex" ? step.hasBin : null;
+
+  // Step 1: request device code from GitHub.
   useEffect(() => {
-    if (step.kind !== "claude" && step.kind !== "codex") return;
-    if (step.hasBin !== null) return;
+    if (githubPhase !== "init") return;
     let cancelled = false;
-    const bin = step.kind;
-    isBinaryInstalled(bin).then((has) => {
+    fetch("https://github.com/login/device/code", {
+      method: "POST",
+      headers: { "Accept": "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: GITHUB_CLIENT_ID, scope: "repo" }),
+    })
+      .then((r) => r.json() as Promise<Record<string, unknown>>)
+      .then((data) => {
+        if (cancelled || !mountedRef.current) return;
+        if (!data.user_code || !data.device_code || !data.verification_uri) {
+          setStep({ kind: "github", phase: "error", error: "failed to start GitHub login — check network" });
+          return;
+        }
+        // Best-effort browser open.
+        const openCmd = process.platform === "darwin" ? "open" : "xdg-open";
+        spawn([openCmd, String(data.verification_uri)], { stdout: "ignore", stderr: "ignore" }).exited.catch(() => {});
+        setStep({
+          kind: "github",
+          phase: "waiting",
+          userCode: String(data.user_code),
+          verificationUri: String(data.verification_uri),
+          deviceCode: String(data.device_code),
+          interval: typeof data.interval === "number" ? data.interval : 5,
+        });
+      })
+      .catch(() => {
+        if (cancelled || !mountedRef.current) return;
+        setStep({ kind: "github", phase: "error", error: "network error — check connection and retry" });
+      });
+    return () => { cancelled = true; };
+  }, [githubPhase]);
+
+  // Step 2: poll for token while in "waiting" phase.
+  useEffect(() => {
+    if (!githubDeviceCode) return;
+    let cancelled = false;
+    let currentMs = githubInterval * 1000;
+
+    const poll = async () => {
       if (cancelled || !mountedRef.current) return;
-      setStep((s) => s.kind === bin ? { ...s, hasBin: has } : s);
+      try {
+        const res = await fetch("https://github.com/login/oauth/access_token", {
+          method: "POST",
+          headers: { "Accept": "application/json", "Content-Type": "application/json" },
+          body: JSON.stringify({
+            client_id: GITHUB_CLIENT_ID,
+            device_code: githubDeviceCode,
+            grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+          }),
+        });
+        if (cancelled || !mountedRef.current) return;
+        const data = await res.json() as Record<string, string>;
+        if (data.access_token) {
+          const user = await fetchCurrentUser(data.access_token);
+          if (cancelled || !mountedRef.current) return;
+          await saveConfig({ githubToken: data.access_token });
+          onClose({ kind: "github", label: `@${user.login}` });
+          return;
+        }
+        if (data.error === "slow_down")     currentMs += 5000;
+        if (data.error === "expired_token") { setStep({ kind: "github", phase: "error", error: "code expired — press enter to try again" }); return; }
+        if (data.error === "access_denied") { setStep({ kind: "github", phase: "error", error: "access denied" }); return; }
+        // authorization_pending or slow_down: keep polling.
+        setTimeout(poll, currentMs);
+      } catch {
+        if (cancelled || !mountedRef.current) return;
+        setTimeout(poll, currentMs);
+      }
+    };
+
+    setTimeout(poll, currentMs);
+    return () => { cancelled = true; };
+  }, [githubDeviceCode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Binary check for claude/codex steps.
+  useEffect(() => {
+    if (!binKind || hasBin !== null) return;
+    let cancelled = false;
+    isBinaryInstalled(binKind).then((has) => {
+      if (cancelled || !mountedRef.current) return;
+      setStep((s) => s.kind === binKind ? { ...s, hasBin: has } : s);
     });
     return () => { cancelled = true; };
-  }, [step.kind, step.kind === "claude" || step.kind === "codex" ? step.hasBin : null]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [binKind, hasBin]);
 
   useInput((input, key) => {
-    // Ctrl+C is handled by the parent chat useInput which fires first (registration order).
-    // Do not swallow it here so the app exits cleanly.
+    // Ctrl+C handled by parent chat useInput (fires first by registration order).
     if (key.ctrl && input === "c") return;
 
     if (step.kind === "provider") {
@@ -56,7 +141,7 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
       if (key.return) {
         const chosen = PROVIDERS[step.idx];
         if (!chosen) return;
-        if (chosen.id === "github") setStep({ kind: "github", buf: "", cursorPos: 0, busy: false });
+        if (chosen.id === "github") setStep({ kind: "github", phase: "init" });
         else if (chosen.id === "claude") setStep({ kind: "claude", buf: "", cursorPos: 0, busy: false, hasBin: null });
         else setStep({ kind: "codex", busy: false, hasBin: null });
         return;
@@ -65,27 +150,11 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
     }
 
     if (step.kind === "github") {
-      if (step.busy)  return;
       if (key.escape) { onClose(null); return; }
-      if (key.return) {
-        const token = step.buf.trim();
-        if (!token) return;
-        setStep((s) => s.kind === "github" ? { ...s, busy: true, error: undefined } : s);
-        fetchCurrentUser(token)
-          .then(async (user) => {
-            if (!mountedRef.current) return;
-            await saveConfig({ githubToken: token });
-            onClose({ kind: "github", label: `@${user.login}` });
-          })
-          .catch(() => {
-            if (!mountedRef.current) return;
-            setStep((s) => s.kind === "github"
-              ? { ...s, busy: false, error: "token is invalid or lacks repo scope" }
-              : s);
-          });
+      if (step.phase === "error" && key.return) {
+        setStep({ kind: "github", phase: "init" });
         return;
       }
-      handleTextKey(input, key, "github");
       return;
     }
 
@@ -117,9 +186,7 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
             clearTimeout(timer);
             if (!mountedRef.current) return;
             if (res.status === 401 || res.status === 403) {
-              setStep((s) => s.kind === "claude"
-                ? { ...s, busy: false, error: "token rejected by Anthropic API" }
-                : s);
+              setStep((s) => s.kind === "claude" ? { ...s, busy: false, error: "token rejected by Anthropic API" } : s);
               return;
             }
             await saveAgentToken(token);
@@ -138,7 +205,7 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
           });
         return;
       }
-      handleTextKey(input, key, "claude");
+      handleTextKey(input, key);
       return;
     }
 
@@ -176,26 +243,27 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
   function handleTextKey(
     input: string,
     key: { backspace?: boolean; delete?: boolean; leftArrow?: boolean; rightArrow?: boolean; ctrl?: boolean; meta?: boolean },
-    kind: "github" | "claude",
   ) {
     if (key.backspace || key.delete) {
       setStep((s) => {
-        if (s.kind !== kind) return s;
+        if (s.kind !== "claude") return s;
         const newBuf = s.buf.slice(0, Math.max(0, s.cursorPos - 1)) + s.buf.slice(s.cursorPos);
         return { ...s, buf: newBuf, cursorPos: Math.max(0, s.cursorPos - 1) };
       });
       return;
     }
-    if (key.leftArrow)  { setStep((s) => s.kind === kind ? { ...s, cursorPos: Math.max(0, s.cursorPos - 1) } : s); return; }
-    if (key.rightArrow) { setStep((s) => s.kind === kind ? { ...s, cursorPos: Math.min(s.buf.length, s.cursorPos + 1) } : s); return; }
+    if (key.leftArrow)  { setStep((s) => s.kind === "claude" ? { ...s, cursorPos: Math.max(0, s.cursorPos - 1) } : s); return; }
+    if (key.rightArrow) { setStep((s) => s.kind === "claude" ? { ...s, cursorPos: Math.min(s.buf.length, s.cursorPos + 1) } : s); return; }
     if (input && !key.ctrl && !key.meta) {
       setStep((s) => {
-        if (s.kind !== kind) return s;
+        if (s.kind !== "claude") return s;
         const newBuf = s.buf.slice(0, s.cursorPos) + input + s.buf.slice(s.cursorPos);
         return { ...s, buf: newBuf, cursorPos: s.cursorPos + input.length };
       });
     }
   }
+
+  // ── Render ──────────────────────────────────────────────────────────────
 
   if (step.kind === "provider") {
     return (
@@ -217,21 +285,37 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
   }
 
   if (step.kind === "github") {
-    const withCursor = step.buf.slice(0, step.cursorPos) + "│" + step.buf.slice(step.cursorPos);
-    return (
-      <Box flexDirection="column" paddingX={2}>
-        <Text color="#888888">{"─── login: GitHub ───────────────────────"}</Text>
-        <Text color="#cccccc">{"  GitHub personal access token (repo scope):"}</Text>
-        <Box paddingLeft={2}>
-          <Text color="#555555">{"❯ "}</Text>
-          <Text color="#ffffff">{step.buf.length === 0 && !step.busy ? "│" : withCursor}</Text>
+    if (step.phase === "init") {
+      return (
+        <Box flexDirection="column" paddingX={2}>
+          <Text color="#888888">{"─── login: GitHub ───────────────────────"}</Text>
+          <Text color="#555555">{"  Requesting code from GitHub…"}</Text>
         </Box>
-        {step.error && <Text color="#ff8888">{`  ✗ ${step.error}`}</Text>}
-        {step.busy
-          ? <Text color="#888888">{"  checking…"}</Text>
-          : <Text color="#555555">{"  enter to confirm · esc to cancel"}</Text>}
-      </Box>
-    );
+      );
+    }
+    if (step.phase === "waiting") {
+      return (
+        <Box flexDirection="column" paddingX={2}>
+          <Text color="#888888">{"─── login: GitHub ───────────────────────"}</Text>
+          <Text color="#cccccc">{"  Enter this code at:"}</Text>
+          <Text color="#888888">{`  ${step.verificationUri}`}</Text>
+          <Box marginTop={1} marginBottom={1} paddingLeft={2}>
+            <Text color="#00c8ff" bold>{step.userCode}</Text>
+          </Box>
+          <Text color="#555555">{"  (browser opened automatically if possible)"}</Text>
+          <Text color="#555555">{"  Waiting for authorization… · esc to cancel"}</Text>
+        </Box>
+      );
+    }
+    if (step.phase === "error") {
+      return (
+        <Box flexDirection="column" paddingX={2}>
+          <Text color="#888888">{"─── login: GitHub ───────────────────────"}</Text>
+          <Text color="#ff8888">{`  ✗ ${step.error}`}</Text>
+          <Text color="#555555">{"  enter to retry · esc to cancel"}</Text>
+        </Box>
+      );
+    }
   }
 
   if (step.kind === "claude") {
