@@ -172,6 +172,19 @@ export async function createPRReview(
   return jsonOrThrow<GitHubReview>(res, "createPRReview");
 }
 
+export async function fetchPRCommits(
+  repo: string,
+  prNumber: number,
+  token?: string,
+): Promise<{
+  sha: string;
+  commit: { message: string; author: { date: string } | null };
+  author: { login: string } | null;
+}[]> {
+  const res = await ghFetch(`/repos/${repo}/pulls/${prNumber}/commits?per_page=100`, token);
+  return jsonOrThrow(res, "fetchPRCommits");
+}
+
 // ---------------------------------------------------------------------------
 // Issues (write)
 
@@ -196,6 +209,30 @@ export async function createIssue(
     body: JSON.stringify({ title, body, labels }),
   });
   return jsonOrThrow<GitHubIssue>(res, "createIssue");
+}
+
+// The /issues/{n}/comments endpoint also works for PRs since GitHub treats PRs
+// as issues for general (non-review) comments.
+export async function addIssueComment(
+  repo: string,
+  number: number,
+  body: string,
+  token: string,
+): Promise<{ id: number; html_url: string }> {
+  const res = await ghFetch(`/repos/${repo}/issues/${number}/comments`, token, {
+    method: "POST",
+    body: JSON.stringify({ body }),
+  });
+  return jsonOrThrow(res, "addIssueComment");
+}
+
+export async function fetchIssueComments(
+  repo: string,
+  number: number,
+  token?: string,
+): Promise<{ id: number; user: { login: string }; body: string }[]> {
+  const res = await ghFetch(`/repos/${repo}/issues/${number}/comments?per_page=100`, token);
+  return jsonOrThrow(res, "fetchIssueComments");
 }
 
 // ---------------------------------------------------------------------------

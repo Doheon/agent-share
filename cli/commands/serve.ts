@@ -403,25 +403,41 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
       if (!ghToken) return; // can't verify without a token
 
       try {
-        // Parse github_ref: "pr:owner/repo:number" or "review:owner/repo:number"
+        // Parse github_ref: "<type>:<repo>:<num>", except "close-rec:<sub>:<repo>:<num>".
         const parts = msg.github_ref.split(":");
         const refType = parts[0];
-        const repo = parts[1] ?? ASH_REPO;
-        const refNum = parseInt(parts[2] ?? "0", 10);
 
         let verified = false;
-        if (refType === "pr") {
-          const pr = await fetchPR(repo, refNum, ghToken).catch(() => null);
-          verified = !!pr && (pr.state === "open" || pr.merged);
-        } else if (refType === "review") {
-          const reviews = await fetchPRReviews(repo, refNum, ghToken).catch(() => []);
-          verified = reviews.length > 0;
-        } else if (refType === "approve") {
-          const reviews = await fetchPRReviews(repo, refNum, ghToken).catch(() => []);
-          verified = reviews.some((r) => r.state === "APPROVED");
-        } else if (refType === "issue") {
-          const issue = await fetchIssue(repo, refNum, ghToken).catch(() => null);
-          verified = !!issue && issue.state === "open";
+        if (refType === "close-rec") {
+          const sub = parts[1];
+          const repo = parts[2] ?? ASH_REPO;
+          const refNum = parseInt(parts[3] ?? "0", 10);
+          if (sub === "pr") {
+            const pr = await fetchPR(repo, refNum, ghToken).catch(() => null);
+            verified = !!pr;
+          } else if (sub === "issue") {
+            const issue = await fetchIssue(repo, refNum, ghToken).catch(() => null);
+            verified = !!issue;
+          }
+        } else {
+          const repo = parts[1] ?? ASH_REPO;
+          const refNum = parseInt(parts[2] ?? "0", 10);
+          if (refType === "pr") {
+            const pr = await fetchPR(repo, refNum, ghToken).catch(() => null);
+            verified = !!pr && (pr.state === "open" || pr.merged);
+          } else if (refType === "review") {
+            const reviews = await fetchPRReviews(repo, refNum, ghToken).catch(() => []);
+            verified = reviews.length > 0;
+          } else if (refType === "approve") {
+            const reviews = await fetchPRReviews(repo, refNum, ghToken).catch(() => []);
+            verified = reviews.some((r) => r.state === "APPROVED");
+          } else if (refType === "fix") {
+            const pr = await fetchPR(repo, refNum, ghToken).catch(() => null);
+            verified = !!pr;
+          } else if (refType === "issue") {
+            const issue = await fetchIssue(repo, refNum, ghToken).catch(() => null);
+            verified = !!issue && issue.state === "open";
+          }
         }
 
         if (!verified) return;
