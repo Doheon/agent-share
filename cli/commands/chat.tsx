@@ -1061,6 +1061,25 @@ function ChatApp({
     }
 
     if (key.return) {
+      // Insert a newline instead of submitting when:
+      //   - Shift+Enter or Alt/Option+Enter is pressed (terminals that report
+      //     modifiers); or
+      //   - the char immediately before the cursor is `\` (escape style —
+      //     works in any terminal that doesn't report modifiers).
+      // Plain Enter still submits.
+      const backslashEscape = cursorPos > 0 && inputVal[cursorPos - 1] === "\\";
+      if (key.shift || key.meta || backslashEscape) {
+        setInputVal((v) => {
+          const before = backslashEscape ? v.slice(0, cursorPos - 1) : v.slice(0, cursorPos);
+          const after = v.slice(cursorPos);
+          const newVal = before + "\n" + after;
+          updateMenuItems(newVal);
+          return newVal;
+        });
+        setCursorPos((p) => backslashEscape ? p : p + 1);
+        return;
+      }
+
       let raw: string;
       if (menuItems.length > 0) {
         raw = "/" + (menuItems[menuIdx]?.cmd ?? "");
@@ -1117,7 +1136,10 @@ function ChatApp({
   const statusDir = process.cwd().replace(homedir(), "~");
   const statusDirShort = statusDir.length > 40 ? "…" + statusDir.slice(-39) : statusDir;
 
-  const inputDisplay = inputVal;
+  const inputLines = inputVal.length === 0 ? [""] : inputVal.split("\n");
+  const beforeCursor = inputVal.slice(0, cursorPos);
+  const cursorRow = beforeCursor.split("\n").length - 1;
+  const cursorCol = stringWidth(beforeCursor.split("\n").pop() ?? "");
 
   const SIG = "#00c8ff";
   const MX = 3;
@@ -1131,9 +1153,8 @@ function ChatApp({
   // Dynamic area layout (0-indexed):
   //   pendingMsg (0-1) + separator(1) + input ← cursor here + separator(1) + menu/picker + status
   const pendingLines = pendingMsg ? 1 : 0;
-  const cursorDisplayX = stringWidth(inputVal.slice(0, cursorPos));
   if (!serveDisplay && !loginActive) {
-    setCursorPosition({ x: 3 + cursorDisplayX, y: pendingLines + 1 });
+    setCursorPosition({ x: 3 + cursorCol, y: pendingLines + 1 + cursorRow });
   } else {
     setCursorPosition({ x: 0, y: 0 });
   }
@@ -1249,12 +1270,16 @@ function ChatApp({
         })() : (
           <Box flexDirection="column">
             <Text color="#888888">{"━".repeat(termWidth)}</Text>
-            <Box paddingLeft={1} paddingRight={2} gap={1}>
+            <Box paddingLeft={1} paddingRight={2} gap={1} alignItems="flex-start">
               <Text color="#ffffff">❯</Text>
-              <Text color="#ffffff">{inputVal.length === 0 && cursorPos === 0
-                ? <Text color="#555555">{"type a prompt, /help for commands"}</Text>
-                : inputDisplay
-              }</Text>
+              <Box flexDirection="column">
+                {inputVal.length === 0 && cursorPos === 0
+                  ? <Text color="#555555">{"type a prompt, /help for commands"}</Text>
+                  : inputLines.map((line, i) => (
+                      <Text key={i} color="#ffffff">{line.length === 0 ? " " : line}</Text>
+                    ))
+                }
+              </Box>
             </Box>
             <Text color="#888888">{"━".repeat(termWidth)}</Text>
           </Box>
