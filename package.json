@@ -1,9 +1,33 @@
 {
-  "name": "ash",
+  "name": "@doheon/ash",
   "version": "0.1.0",
+  "description": "Distributed P2P AI coding agent network — share idle compute, earn credits, fully self-hosted.",
+  "keywords": ["ai", "agent", "p2p", "cli", "claude", "codex", "hyperswarm"],
+  "license": "MIT",
+  "author": "Doheon",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Doheon/agent-share.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "type": "module",
   "bin": {
     "ash": "bin/ash"
+  },
+  "files": [
+    "bin",
+    "cli",
+    "core",
+    "shared",
+    "register.mjs",
+    "loader.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "dev": "node --import ./register.mjs --import tsx/esm cli/main.ts",

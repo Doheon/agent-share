@@ -49,7 +49,16 @@ You (requester)             Hyperswarm DHT              Peer (acceptor)
 
 ## Installation
 
-**Requirements:** Node.js 18+, git
+**Requirements:** Node.js 18+
+
+```bash
+npm install -g @doheon/ash
+ash init
+```
+
+This creates `~/.ash/` with your Ed25519 keypair, Corestore, and configuration.
+
+### Install from source
 
 ```bash
 git clone https://github.com/Doheon/agent-share
@@ -58,8 +67,6 @@ npm install
 npm install -g .
 ash init
 ```
-
-This creates `~/.ash/` with your Ed25519 keypair, Corestore, and configuration.
 
 ---
 

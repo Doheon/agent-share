@@ -49,7 +49,16 @@ ash는 서버가 아닌 순수 피어투피어 네트워크입니다. 작업을 
 
 ## 설치
 
-**필요:** Node.js 18+, git
+**필요:** Node.js 18+
+
+```bash
+npm install -g @doheon/ash
+ash init
+```
+
+이 명령어는 `~/.ash/`에 Ed25519 키페어, Corestore, 설정을 생성합니다.
+
+### 소스에서 설치
 
 ```bash
 git clone https://github.com/Doheon/agent-share
@@ -58,8 +67,6 @@ npm install
 npm install -g .
 ash init
 ```
-
-이 명령어는 `~/.ash/`에 Ed25519 키페어, Corestore, 설정을 생성합니다.
 
 ---
 
