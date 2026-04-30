@@ -50,6 +50,7 @@ import { signEd25519, verifyEd25519, rawHexToPublicKey } from "../../core/crypto
 import { canonicalStringify } from "../../shared/canonical.ts";
 import { eventWithoutSignature } from "../../shared/events.ts";
 import { fetchPR, fetchPRReviews, fetchIssue, ASH_REPO } from "../../core/github/client.ts";
+import { getRuntime } from "../../core/sandbox/runtime.ts";
 
 const IS_TTY = process.stdout.isTTY && process.env.NO_COLOR === undefined;
 const _a = (c: string) => IS_TTY ? `\x1b[${c}m` : "";
@@ -292,6 +293,15 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
       out(`\n  ${RD}✗${R}  Credentials still invalid. Re-run: ash init\n\n`);
       process.exit(1);
     }
+  }
+
+  // Verify container runtime before joining the swarm so users get a clear
+  // error immediately instead of a cryptic sandbox failure mid-task.
+  try {
+    await getRuntime();
+  } catch {
+    out(`\n  ${RD}✗${R}  No container runtime found. Run: ash setup\n\n`);
+    process.exit(1);
   }
 
   // Make sure we have an RSA keypair so we can advertise our pubkey.

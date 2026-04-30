@@ -49,7 +49,7 @@ You (requester)             Hyperswarm DHT              Peer (acceptor)
 
 ## Installation
 
-**Requirements:** Node.js 18+
+**Requirements:** Node.js 18+, git, Podman or Docker (required for `ash serve`)
 
 ```bash
 npm install -g @doheon/ash
@@ -94,7 +94,7 @@ Supports three providers:
 
 | Provider | Method |
 |----------|--------|
-| **GitHub** | OAuth Device Flow — opens browser, poll until authorized |
+| **GitHub** | Prompts for a personal access token (PAT) with `repo` scope. TUI `/login` uses OAuth Device Flow instead. |
 | **Claude Code** | Run `claude setup-token` to generate a long-lived `sk-ant-…` token |
 | **Codex** | Creates an isolated session at `~/.ash/codex-session` |
 
@@ -140,6 +140,8 @@ When a task is available:
 6. Receive settlement credits
 
 ### Earn credits via GitHub contributions
+
+> **Note:** `ash mine` contributes to the [ash GitHub repository](https://github.com/Doheon/agent-share) itself. Improving ash earns you credits on the network.
 
 ```bash
 # Auto-cycle: pick the highest-priority action and execute
@@ -188,6 +190,7 @@ Shows your username, credit balance, pubkey, and login status for each AI agent.
 | `ash serve --allow-self` | Include your own tasks (testing) |
 | `ash status` | Show identity, balance, and agent login status |
 | `ash set <model>` | Set model tier (e.g., `claude-sonnet`) |
+| `ash set github-token <PAT>` | Save a GitHub personal access token |
 | `ash login [agent]` | Log in to GitHub, Claude Code, or Codex |
 | `ash setup` | Re-run environment checks |
 | `ash mine [-n N] [query]` | Earn credits via GitHub contributions |

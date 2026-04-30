@@ -49,7 +49,7 @@ ash는 서버가 아닌 순수 피어투피어 네트워크입니다. 작업을 
 
 ## 설치
 
-**필요:** Node.js 18+
+**필요:** Node.js 18+, git, Podman 또는 Docker (`ash serve` 사용 시 필수)
 
 ```bash
 npm install -g @doheon/ash
@@ -94,7 +94,7 @@ ash login
 
 | 프로바이더 | 방식 |
 |-----------|------|
-| **GitHub** | OAuth Device Flow — 브라우저를 열고 인가될 때까지 폴링 |
+| **GitHub** | `repo` 스코프가 있는 개인 액세스 토큰(PAT) 입력. TUI `/login`에서는 OAuth Device Flow 사용. |
 | **Claude Code** | `claude setup-token`으로 장기 토큰(`sk-ant-…`) 생성 후 입력 |
 | **Codex** | `~/.ash/codex-session`에 격리된 세션 생성 |
 
@@ -140,6 +140,8 @@ ash serve --allow-self
 6. 정산 크레딧 수신
 
 ### GitHub 기여로 크레딧 획득
+
+> **참고:** `ash mine`은 [ash GitHub 레포지토리](https://github.com/Doheon/agent-share) 자체에 기여합니다. ash를 개선하면 네트워크에서 크레딧을 획득합니다.
 
 ```bash
 # 자동 사이클: 우선순위가 가장 높은 액션 실행
@@ -188,6 +190,7 @@ ash status
 | `ash serve --allow-self` | 자기 작업도 포함 (테스트용) |
 | `ash status` | 신원, 잔액, 에이전트 로그인 상태 표시 |
 | `ash set <모델>` | 모델 티어 변경 (예: `claude-sonnet`) |
+| `ash set github-token <PAT>` | GitHub 개인 액세스 토큰 저장 |
 | `ash login [에이전트]` | GitHub, Claude Code, Codex 로그인 |
 | `ash setup` | 환경 재점검 |
 | `ash mine [-n N] [쿼리]` | GitHub 기여로 크레딧 획득 |
