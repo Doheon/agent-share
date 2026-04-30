@@ -44,6 +44,7 @@ import {
   createPRReview,
   createIssue,
   addIssueComment,
+  addLabels,
   ASH_REPO,
   type GitHubIssue,
   type GitHubPR,
@@ -53,6 +54,20 @@ import { AshSwarm } from "../../core/p2p/swarm.ts";
 import type { MineAction } from "../../core/p2p/messages.ts";
 import type { EarnEvent } from "../../shared/events.ts";
 import { spawn } from "../../core/util/spawn.ts";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export type Logger = (s: string) => void;
+
+export interface MineContext {
+  token: string;
+  myPub: string;
+  privKey: import("node:crypto").KeyObject;
+  ghLogin: string;
+  ghEmail: string;
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -70,6 +85,7 @@ const MINE_CREDITS: Record<MineAction, number> = {
 };
 const TEST_BONUS = 3;
 
+const MINE_LABEL = "ash-mine";
 const FIX_MARKER = "[ash-mine-fix]";
 const CLOSE_REC_MARKER = "<!-- ash-mine:close-rec -->";
 
@@ -83,7 +99,7 @@ const R = _a("0"), B = _a("1"), D = _a("2");
 const GR = _a("32"), YL = _a("33"), RD = _a("31"), CY = _a("36");
 
 const enc = new TextEncoder();
-const out = (s: string) => writeSync(1, enc.encode(s));
+const cliOut: Logger = (s: string) => writeSync(1, enc.encode(s));
 
 // ---------------------------------------------------------------------------
 // GitHub state → action selection
@@ -97,8 +113,8 @@ type MineDecision =
   | { action: "pr_create"; issue: GitHubIssue }
   | { action: "idle"; reason: string };
 
-async function selectAction(token: string, myLogin: string): Promise<MineDecision> {
-  out(`  ${D}scanning GitHub state…${R}\n`);
+async function selectAction(token: string, myLogin: string, log: Logger): Promise<MineDecision> {
+  log(`  ${D}scanning GitHub state…${R}\n`);
 
   const [issues, prs] = await Promise.all([
     fetchOpenIssues(ASH_REPO, token),
@@ -500,12 +516,13 @@ async function earnCredits(opts: {
   amount: number;
   url: string;
   extra?: string;
+  log: Logger;
 }): Promise<void> {
-  const { myPub, privKey, taskId, githubRef, action, amount, url, extra } = opts;
+  const { myPub, privKey, taskId, githubRef, action, amount, url, extra, log } = opts;
   const nonce = await getNextNonce(myPub);
   const selfEarn = await buildSelfSignedEarn(myPub, privKey, taskId, amount, nonce);
 
-  out(`  ${D}broadcasting mine:claim…${R}\n`);
+  log(`  ${D}broadcasting mine:claim…${R}\n`);
   const earnEvent = await broadcastAndCollectCosign({
     claimId: randomUUID(),
     claimantPubkey: myPub,
@@ -521,7 +538,7 @@ async function earnCredits(opts: {
 
   await appendLocalEvent(myPub, earnEvent);
   const extraNote = extra ? `  (${extra})` : "";
-  out(`  ${GR}✓${R}  ${B}+${amount} credits${R}${extraNote}\n`);
+  log(`  ${GR}✓${R}  ${B}+${amount} credits${R}${extraNote}\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -535,31 +552,30 @@ async function doPrCreate(
   privKey: import("node:crypto").KeyObject,
   ghLogin: string,
   ghEmail: string,
+  log: Logger,
 ): Promise<boolean> {
-  out(`\n  ${B}[pr_create]${R} #${issue.number} ${issue.title}\n`);
-  out(`  ${D}${"─".repeat(56)}${R}\n`);
+  log(`\n  ${B}[pr_create]${R} #${issue.number} ${issue.title}\n`);
+  log(`  ${D}${"─".repeat(56)}${R}\n`);
 
-  // Single working tree shared by verdict + implement so the verdict step has
-  // codebase context (avoids shallow "close" decisions made from issue text alone).
   const tmpDir = await mkdtemp(join(tmpdir(), "ash-mine-"));
   try {
-    out(`  ${D}cloning Doheon/ash…${R}\n`);
+    log(`  ${D}cloning Doheon/ash…${R}\n`);
     await git(["clone", "--depth=1", `https://github.com/${ASH_REPO}.git`, tmpDir]);
 
-    out(`  ${CY}deciding implement vs close…${R}\n`);
+    log(`  ${CY}deciding implement vs close…${R}\n`);
     const { code: vcode, text: vtext } = await runAgentCapture(buildPrCreateVerdictPrompt(issue), tmpDir);
-    out(`  ${D}agent exit: ${vcode}${R}\n`);
+    log(`  ${D}agent exit: ${vcode}${R}\n`);
     const verdict = parsePrCreateVerdict(vtext);
 
     if (!verdict) {
-      out(`  ${YL}⚠${R}  Could not parse verdict. Skipping.\n`);
+      log(`  ${YL}⚠${R}  Could not parse verdict. Skipping.\n`);
       return false;
     }
 
     if (verdict.verdict === "close") {
-      const body = `${CLOSE_REC_MARKER}\n${verdict.reason || "Recommend closing this issue."}`;
+      const body = `${CLOSE_REC_MARKER}\n${verdict.reason || "Recommend closing this issue."}\n\n---\n*Tagged: \`${MINE_LABEL}\`*`;
       const comment = await addIssueComment(ASH_REPO, issue.number, body, token);
-      out(`  ${GR}✓${R}  Close recommended: ${comment.html_url}\n`);
+      log(`  ${GR}✓${R}  Close recommended: ${comment.html_url}\n`);
       await earnCredits({
         myPub, privKey,
         taskId: `github:close-rec:issue:${ASH_REPO}:${issue.number}:${myPub}`,
@@ -567,12 +583,12 @@ async function doPrCreate(
         action: "pr_create_close_rec",
         amount: MINE_CREDITS.pr_create_close_rec,
         url: issue.html_url,
+        log,
       });
       return true;
     }
 
-    // verdict === "implement" → reuse the cloned tree, push to my fork.
-    out(`  ${D}forking Doheon/ash…${R}\n`);
+    log(`  ${D}forking Doheon/ash…${R}\n`);
     const fork = await ensureFork(ASH_REPO, token);
 
     const branch = `ash-mine/issue-${issue.number}`;
@@ -580,38 +596,38 @@ async function doPrCreate(
     await git(["config", "user.email", ghEmail], tmpDir);
     await git(["checkout", "-b", branch], tmpDir);
 
-    out(`  ${CY}running agent…${R}\n`);
-    const code = await runAgentInteractive(buildCreatePrompt(issue), tmpDir, (l) => out(`  ${D}${l}${R}\n`));
-    out(`\n  ${D}agent exit: ${code}${R}\n`);
+    log(`  ${CY}running agent…${R}\n`);
+    const code = await runAgentInteractive(buildCreatePrompt(issue), tmpDir, (l) => log(`  ${D}${l}${R}\n`));
+    log(`\n  ${D}agent exit: ${code}${R}\n`);
 
     const diffStat = await git(["diff", "--stat", "HEAD"], tmpDir).catch(() => "");
     if (!diffStat.trim()) {
-      out(`  ${YL}⚠${R}  No changes produced. Skipping.\n`);
+      log(`  ${YL}⚠${R}  No changes produced. Skipping.\n`);
       return false;
     }
-    out(`\n${diffStat}\n`);
+    log(`\n${diffStat}\n`);
 
-    // Race-condition guard: re-check GitHub in case another peer created a PR while agent was running.
     const freshPRs = await fetchOpenPRs(ASH_REPO, token);
     const alreadyLinked = freshPRs.some((p) => {
       const text = `${p.title} ${p.body ?? ""}`;
       return [...text.matchAll(/#(\d+)/g)].some((m) => parseInt(m[1]!, 10) === issue.number);
     });
     if (alreadyLinked) {
-      out(`  ${YL}⚠${R}  A PR for #${issue.number} was created by another peer. Skipping.\n`);
+      log(`  ${YL}⚠${R}  A PR for #${issue.number} was created by another peer. Skipping.\n`);
       return false;
     }
 
     await git(["add", "-A"], tmpDir);
     await git(["commit", "-m", `fix: ${issue.title}\n\nResolves #${issue.number}\n\nImplemented via ash mine`], tmpDir);
 
-    out(`  ${D}pushing…${R}\n`);
+    log(`  ${D}pushing…${R}\n`);
     await pushBranch(tmpDir, branch, fork.clone_url, token);
 
     const prBody = `Resolves #${issue.number}\n\n---\n*Implemented by [ash mine](https://github.com/Doheon/ash).*`;
     const [owner] = fork.full_name.split("/");
     const pr = await createPR(ASH_REPO, `fix: ${issue.title}`, prBody, `${owner}:${branch}`, "main", token);
-    out(`\n  ${GR}✓${R}  PR created: ${pr.html_url}\n`);
+    await addLabels(ASH_REPO, pr.number, [MINE_LABEL], token).catch(() => undefined);
+    log(`\n  ${GR}✓${R}  PR created: ${pr.html_url}\n`);
 
     const testsChanged = hasTestChanges(diffStat);
     const amount = MINE_CREDITS.pr_create + (testsChanged ? TEST_BONUS : 0);
@@ -622,6 +638,7 @@ async function doPrCreate(
       action: "pr_create", amount,
       url: pr.html_url,
       extra: testsChanged ? "includes test bonus" : undefined,
+      log,
     });
     return true;
   } finally {
@@ -634,30 +651,31 @@ async function doPrReview(
   token: string,
   myPub: string,
   privKey: import("node:crypto").KeyObject,
+  log: Logger,
 ): Promise<boolean> {
-  out(`\n  ${B}[pr_review]${R} #${pr.number} ${pr.title}\n`);
-  out(`  ${D}${"─".repeat(56)}${R}\n`);
+  log(`\n  ${B}[pr_review]${R} #${pr.number} ${pr.title}\n`);
+  log(`  ${D}${"─".repeat(56)}${R}\n`);
 
-  out(`  ${D}fetching diff…${R}\n`);
+  log(`  ${D}fetching diff…${R}\n`);
   const diff = await fetchPRDiff(ASH_REPO, pr.number, token);
 
   const tmpDir = await mkdtemp(join(tmpdir(), "ash-review-"));
   try {
-    out(`  ${CY}running agent…${R}\n`);
+    log(`  ${CY}running agent…${R}\n`);
     const { code, text } = await runAgentCapture(buildReviewPrompt(pr, diff), tmpDir);
-    out(`  ${D}agent exit: ${code}${R}\n`);
+    log(`  ${D}agent exit: ${code}${R}\n`);
 
     const parsed = parseReviewVerdict(text);
     if (!parsed) {
-      out(`  ${RD}✗${R}  Could not parse verdict. Skipping.\n`);
+      log(`  ${RD}✗${R}  Could not parse verdict. Skipping.\n`);
       return false;
     }
-    out(`  ${D}verdict: ${B}${parsed.verdict}${R}\n`);
-    out(`  ${D}${parsed.body.slice(0, 160)}…${R}\n\n`);
+    log(`  ${D}verdict: ${B}${parsed.verdict}${R}\n`);
+    log(`  ${D}${parsed.body.slice(0, 160)}…${R}\n\n`);
 
     if (parsed.verdict === "approve") {
       const review = await createPRReview(ASH_REPO, pr.number, parsed.body, "APPROVE", token);
-      out(`  ${GR}✓${R}  Approved: ${review.html_url}\n`);
+      log(`  ${GR}✓${R}  Approved: ${review.html_url}\n`);
       await earnCredits({
         myPub, privKey,
         taskId: `github:approve:${ASH_REPO}:${pr.number}:${review.id}`,
@@ -665,13 +683,14 @@ async function doPrReview(
         action: "pr_review_approve",
         amount: MINE_CREDITS.pr_review_approve,
         url: review.html_url,
+        log,
       });
       return true;
     }
 
     if (parsed.verdict === "changes_requested") {
       const review = await createPRReview(ASH_REPO, pr.number, parsed.body, "REQUEST_CHANGES", token);
-      out(`  ${GR}✓${R}  Changes requested: ${review.html_url}\n`);
+      log(`  ${GR}✓${R}  Changes requested: ${review.html_url}\n`);
       await earnCredits({
         myPub, privKey,
         taskId: `github:review:${ASH_REPO}:${pr.number}:${review.id}`,
@@ -679,14 +698,15 @@ async function doPrReview(
         action: "pr_review_changes_requested",
         amount: MINE_CREDITS.pr_review_changes_requested,
         url: review.html_url,
+        log,
       });
       return true;
     }
 
     // close_recommend
-    const body = `${CLOSE_REC_MARKER}\n${parsed.body}`;
+    const body = `${CLOSE_REC_MARKER}\n${parsed.body}\n\n---\n*Tagged: \`${MINE_LABEL}\`*`;
     const review = await createPRReview(ASH_REPO, pr.number, body, "COMMENT", token);
-    out(`  ${GR}✓${R}  Close recommended: ${review.html_url}\n`);
+    log(`  ${GR}✓${R}  Close recommended: ${review.html_url}\n`);
     await earnCredits({
       myPub, privKey,
       taskId: `github:close-rec:pr:${ASH_REPO}:${pr.number}:${myPub}`,
@@ -694,6 +714,7 @@ async function doPrReview(
       action: "pr_review_close_rec",
       amount: MINE_CREDITS.pr_review_close_rec,
       url: review.html_url,
+      log,
     });
     return true;
   } finally {
@@ -710,24 +731,25 @@ async function doPrFix(
   privKey: import("node:crypto").KeyObject,
   ghLogin: string,
   ghEmail: string,
+  log: Logger,
 ): Promise<boolean> {
-  out(`\n  ${B}[pr_fix:${mode}]${R} #${pr.number} ${pr.title}\n`);
-  out(`  ${D}${"─".repeat(56)}${R}\n`);
+  log(`\n  ${B}[pr_fix:${mode}]${R} #${pr.number} ${pr.title}\n`);
+  log(`  ${D}${"─".repeat(56)}${R}\n`);
 
   const headRepo = pr.head.repo?.full_name;
   if (!headRepo) {
-    out(`  ${YL}⚠${R}  PR head repo missing (deleted fork?). Skipping.\n`);
+    log(`  ${YL}⚠${R}  PR head repo missing (deleted fork?). Skipping.\n`);
     return false;
   }
   const headCloneUrl = `https://github.com/${headRepo}.git`;
   const branch = pr.head.ref;
 
-  out(`  ${D}fetching diff…${R}\n`);
+  log(`  ${D}fetching diff…${R}\n`);
   const diff = await fetchPRDiff(ASH_REPO, pr.number, token);
 
   const tmpDir = await mkdtemp(join(tmpdir(), "ash-fix-"));
   try {
-    out(`  ${D}cloning ${headRepo}#${branch}…${R}\n`);
+    log(`  ${D}cloning ${headRepo}#${branch}…${R}\n`);
     const authedUrl = headCloneUrl.replace("https://", `https://oauth2:${token}@`);
     await git(["clone", "--depth=20", "--branch", branch, authedUrl, tmpDir]);
     await git(["config", "user.name", ghLogin], tmpDir);
@@ -737,16 +759,16 @@ async function doPrFix(
       ? buildFixFeedbackPrompt(pr, diff, feedback)
       : buildFixSelfPrompt(pr, diff);
 
-    out(`  ${CY}running agent…${R}\n`);
-    const code = await runAgentInteractive(prompt, tmpDir, (l) => out(`  ${D}${l}${R}\n`));
-    out(`\n  ${D}agent exit: ${code}${R}\n`);
+    log(`  ${CY}running agent…${R}\n`);
+    const code = await runAgentInteractive(prompt, tmpDir, (l) => log(`  ${D}${l}${R}\n`));
+    log(`\n  ${D}agent exit: ${code}${R}\n`);
 
     const diffStat = await git(["diff", "--stat", "HEAD"], tmpDir).catch(() => "");
     if (!diffStat.trim()) {
-      out(`  ${YL}⚠${R}  No changes produced. Skipping.\n`);
+      log(`  ${YL}⚠${R}  No changes produced. Skipping.\n`);
       return false;
     }
-    out(`\n${diffStat}\n`);
+    log(`\n${diffStat}\n`);
 
     await git(["add", "-A"], tmpDir);
     const subject = mode === "feedback"
@@ -754,7 +776,7 @@ async function doPrFix(
       : `chore: ${FIX_MARKER} self-review improvements`;
     await git(["commit", "-m", subject], tmpDir);
 
-    out(`  ${D}pushing…${R}\n`);
+    log(`  ${D}pushing…${R}\n`);
     await pushBranch(tmpDir, branch, headCloneUrl, token);
 
     const sha = await git(["rev-parse", "HEAD"], tmpDir);
@@ -767,6 +789,7 @@ async function doPrFix(
       action,
       amount: MINE_CREDITS[action],
       url: pr.html_url,
+      log,
     });
     return true;
   } finally {
@@ -779,44 +802,44 @@ async function doIssueQuery(
   token: string,
   myPub: string,
   privKey: import("node:crypto").KeyObject,
+  log: Logger,
 ): Promise<boolean> {
-  out(`\n  ${B}[issue:query]${R} ${query}\n`);
-  out(`  ${D}${"─".repeat(56)}${R}\n`);
+  log(`\n  ${B}[issue:query]${R} ${query}\n`);
+  log(`  ${D}${"─".repeat(56)}${R}\n`);
 
   const tmpDir = await mkdtemp(join(tmpdir(), "ash-mine-issue-"));
   try {
-    out(`  ${D}cloning Doheon/ash…${R}\n`);
+    log(`  ${D}cloning Doheon/ash…${R}\n`);
     await git(["clone", "--depth=1", `https://github.com/${ASH_REPO}.git`, tmpDir]);
 
-    out(`  ${CY}running agent…${R}\n`);
+    log(`  ${CY}running agent…${R}\n`);
     const { code, text } = await runAgentCapture(buildIssueQueryPrompt(query), tmpDir);
-    out(`  ${D}agent exit: ${code}${R}\n`);
+    log(`  ${D}agent exit: ${code}${R}\n`);
 
     const parsed = parseIssueQueryOutput(text);
     if (!parsed) {
-      out(`  ${YL}⚠${R}  Could not parse output. Skipping.\n`);
+      log(`  ${YL}⚠${R}  Could not parse output. Skipping.\n`);
       return false;
     }
     if (parsed.verdict === "reject") {
-      out(`  ${YL}⚠${R}  Agent rejected the query. No issue created.\n`);
+      log(`  ${YL}⚠${R}  Agent rejected the query. No issue created.\n`);
       return false;
     }
 
-    // Verify each cited file exists in the cloned tree.
     for (const ev of parsed.evidence) {
       const path = ev.split(":")[0]!;
       try {
         await access(join(tmpDir, path));
       } catch {
-        out(`  ${RD}✗${R}  evidence verification failed: ${path}\n`);
+        log(`  ${RD}✗${R}  evidence verification failed: ${path}\n`);
         return false;
       }
     }
 
     const fullBody = `${parsed.body}\n\n---\n*Reported via ash mine: "${query}"*`;
-    out(`  ${D}opening issue: ${B}${parsed.title}${R}\n`);
-    const issue = await createIssue(ASH_REPO, parsed.title, fullBody, [parsed.label], token);
-    out(`  ${GR}✓${R}  Issue created: ${issue.html_url}\n`);
+    log(`  ${D}opening issue: ${B}${parsed.title}${R}\n`);
+    const issue = await createIssue(ASH_REPO, parsed.title, fullBody, [parsed.label, MINE_LABEL], token);
+    log(`  ${GR}✓${R}  Issue created: ${issue.html_url}\n`);
 
     await earnCredits({
       myPub, privKey,
@@ -825,6 +848,7 @@ async function doIssueQuery(
       action: "issue_create",
       amount: MINE_CREDITS.issue_create,
       url: issue.html_url,
+      log,
     });
     return true;
   } finally {
@@ -833,16 +857,10 @@ async function doIssueQuery(
 }
 
 // ---------------------------------------------------------------------------
-// Main entry
+// Context loaders
 // ---------------------------------------------------------------------------
 
-async function loadCommonContext(): Promise<{
-  token: string;
-  myPub: string;
-  privKey: import("node:crypto").KeyObject;
-  ghLogin: string;
-  ghEmail: string;
-} | null> {
+async function loadCommonContext(): Promise<MineContext | null> {
   const cfg = await loadConfig();
   const token = cfg.githubToken ?? process.env.GITHUB_TOKEN;
   if (!token) {
@@ -859,59 +877,84 @@ async function loadCommonContext(): Promise<{
   return { token, myPub, privKey, ghLogin: ghUser.login, ghEmail };
 }
 
-async function runMine(opts: { count: number }): Promise<void> {
-  const ctx = await loadCommonContext();
-  if (!ctx) return;
+/**
+ * Like loadCommonContext but throws instead of prompting — safe to call from TUI.
+ * Returns an error string on failure, or the context on success.
+ */
+export async function loadMineContext(): Promise<MineContext | { error: string }> {
+  const cfg = await loadConfig();
+  const token = cfg.githubToken ?? process.env.GITHUB_TOKEN;
+  if (!token) return { error: "no GitHub token — run: ash set github-token <PAT>" };
+  if (!cfg.pubkey) return { error: "not initialized — run: ash init" };
+  try {
+    const { priv: privKey } = await loadIdentity();
+    const ghUser = await fetchCurrentUser(token);
+    const ghEmail = ghUser.email ?? `${ghUser.login}@users.noreply.github.com`;
+    return { token, myPub: cfg.pubkey, privKey, ghLogin: ghUser.login, ghEmail };
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Exported core runners (accept a logger — usable from TUI or CLI)
+// ---------------------------------------------------------------------------
+
+export async function runMineCore(
+  ctx: MineContext,
+  opts: { count: number },
+  log: Logger,
+): Promise<void> {
   const { token, myPub, privKey, ghLogin, ghEmail } = ctx;
 
-  out(`\n  ${B}${CY}ash mine${R}  ${D}· up to ${opts.count} task(s)  · @${ghLogin}${R}\n\n`);
+  log(`\n  ${B}${CY}ash mine${R}  ${D}· up to ${opts.count} task(s)  · @${ghLogin}${R}\n\n`);
 
   let done = 0;
   while (done < opts.count) {
-    const decision = await selectAction(token, ghLogin);
+    const decision = await selectAction(token, ghLogin, log);
 
     if (decision.action === "idle") {
-      out(`  ${YL}⚠${R}  ${decision.reason}\n\n`);
+      log(`  ${YL}⚠${R}  ${decision.reason}\n\n`);
       break;
     }
 
-    out(`  ${D}selected action: ${B}${decision.action}${R}\n`);
+    log(`  ${D}selected action: ${B}${decision.action}${R}\n`);
 
     try {
       let acted = false;
       if (decision.action === "pr_fix") {
-        acted = await doPrFix(decision.pr, decision.mode, decision.feedback, token, myPub, privKey, ghLogin, ghEmail);
+        acted = await doPrFix(decision.pr, decision.mode, decision.feedback, token, myPub, privKey, ghLogin, ghEmail, log);
       } else if (decision.action === "pr_review") {
-        acted = await doPrReview(decision.pr, token, myPub, privKey);
+        acted = await doPrReview(decision.pr, token, myPub, privKey, log);
       } else if (decision.action === "pr_create") {
-        acted = await doPrCreate(decision.issue, token, myPub, privKey, ghLogin, ghEmail);
+        acted = await doPrCreate(decision.issue, token, myPub, privKey, ghLogin, ghEmail, log);
       }
       if (!acted) break;
       done++;
-      out(`  ${D}${"─".repeat(56)}${R}\n`);
+      log(`  ${D}${"─".repeat(56)}${R}\n`);
     } catch (err) {
-      out(`  ${YL}⚠${R}  ${(err as Error).message}\n`);
+      log(`  ${YL}⚠${R}  ${(err as Error).message}\n`);
       break;
     }
   }
 
-  out(`\n  ${GR}✓${R}  Done: ${done} task(s) completed\n\n`);
-  await closeLocalStore().catch(() => undefined);
+  log(`\n  ${GR}✓${R}  Done: ${done} task(s) completed\n\n`);
 }
 
-async function runIssueQuery(query: string): Promise<void> {
-  const ctx = await loadCommonContext();
-  if (!ctx) return;
+export async function runIssueQueryCore(
+  ctx: MineContext,
+  query: string,
+  log: Logger,
+): Promise<void> {
   const { token, myPub, privKey, ghLogin } = ctx;
 
-  out(`\n  ${B}${CY}ash mine${R}  ${D}· query mode  · @${ghLogin}${R}\n`);
+  log(`\n  ${B}${CY}ash mine${R}  ${D}· query mode  · @${ghLogin}${R}\n`);
 
   try {
-    await doIssueQuery(query, token, myPub, privKey);
+    await doIssueQuery(query, token, myPub, privKey, log);
   } catch (err) {
-    out(`  ${YL}⚠${R}  ${(err as Error).message}\n`);
+    log(`  ${YL}⚠${R}  ${(err as Error).message}\n`);
   }
-  await closeLocalStore().catch(() => undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -931,12 +974,15 @@ export const mineCommand = new Command("mine")
       }
       throw err;
     }
+    const ctx = await loadCommonContext();
+    if (!ctx) return;
     const trimmed = query?.trim();
     const run = trimmed
-      ? runIssueQuery(trimmed)
-      : runMine({ count: options.count as number });
+      ? runIssueQueryCore(ctx, trimmed, cliOut)
+      : runMineCore(ctx, { count: options.count as number }, cliOut);
     await run.catch((err: Error) => {
       console.error(`\nerror: ${err.message}\n`);
       process.exit(1);
     });
+    await closeLocalStore().catch(() => undefined);
   });

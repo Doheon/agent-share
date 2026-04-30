@@ -51,11 +51,13 @@ import { CLIENT_VERSION } from "../../shared/protocol.ts";
 import { validateAgentCredentials, ensureAgentLoggedIn, getAgentStatus } from "./init.ts";
 import { fetchCurrentUser } from "../../core/github/client.ts";
 import { AuthError, processTask, type ActiveTask } from "./serve.ts";
+import { loadMineContext, runMineCore, runIssueQueryCore } from "./mine.ts";
 import { LoginScreen, type LoginResult } from "./login_screen.tsx";
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const COMMANDS = [
   { cmd: "serve",   desc: "accept tasks to earn  (e.g. /serve 5)" },
+  { cmd: "mine",    desc: "earn credits via GitHub  (e.g. /mine or /mine 3 or /mine \"bug query\")" },
   { cmd: "model",   desc: "pick a model  (e.g. /model sonnet)" },
   { cmd: "new",     desc: "start a new conversation (clear turn history)" },
   { cmd: "status",  desc: "show account info" },
@@ -177,6 +179,7 @@ function ChatApp({
   const confirmResolveRef = useRef<((apply: boolean) => void) | null>(null);
   const currentModelRef = useRef(initialModel);
   const serveModeRef = useRef<ServeModeState | null>(null);
+  const mineActiveRef = useRef(false);
   const [serveDisplay, setServeDisplay] = useState<ServeDisplay | null>(null);
 
   useEffect(() => { currentModelRef.current = currentModel; }, [currentModel]);
@@ -765,6 +768,7 @@ function ChatApp({
         addMsgs([
           "Commands:",
           "  /serve [N]        accept tasks (N = count; omit for unlimited)",
+          "  /mine [N|\"query\"] earn credits via GitHub (N = task count; or pass a query string)",
           "  /model            interactive model picker",
           "  /model <tier>     switch directly",
           "  /new              start a new conversation (clear turn history)",
@@ -796,6 +800,44 @@ function ChatApp({
           break;
         }
         await enterServeMode(n);
+        break;
+      }
+      case "mine": {
+        if (pendingRef.current) { addMsg("  ⎿ task in flight; wait for it to finish.", "#e3bd5a"); break; }
+        if (serveModeRef.current) { addMsg("  ⎿ stop serve mode first (esc).", "#e3bd5a"); break; }
+        if (mineActiveRef.current) { addMsg("  ⎿ mine already running.", "#e3bd5a"); break; }
+
+        const ctx = await loadMineContext();
+        if ("error" in ctx) { addMsg(`  ⎿ ${ctx.error}`, "#ff8888"); break; }
+
+        const firstArg = args[0];
+        const isCount = firstArg !== undefined && /^\d+$/.test(firstArg);
+        const count = isCount ? parseInt(firstArg, 10) : 1;
+        const query = !isCount && firstArg ? args.join(" ") : undefined;
+
+        const label = query ? `query: "${query}"` : `${count} task(s)`;
+        addMsg(`─── mine · ${label} · @${ctx.ghLogin} ───`, "#00c8ff");
+
+        const mineLogger = (raw: string): void => {
+          const cleaned = raw.replace(/\x1b\[[0-9;]*m/g, "");
+          for (const line of cleaned.split("\n")) {
+            if (line.trim()) addMsg(`  ${line.trim()}`, "#6b6b6b");
+          }
+        };
+
+        mineActiveRef.current = true;
+        (query
+          ? runIssueQueryCore(ctx, query, mineLogger)
+          : runMineCore(ctx, { count }, mineLogger)
+        ).then(async () => {
+          const { balance: b } = await getLocalBalance(userId);
+          setBalance(b);
+          addMsg(`─── mine complete · balance: ${b}cr ───`, "#00c8ff");
+        }).catch((err: Error) => {
+          addMsg(`  ⎿ mine error: ${err.message}`, "#ff8888");
+        }).finally(() => {
+          mineActiveRef.current = false;
+        });
         break;
       }
       case "clear":

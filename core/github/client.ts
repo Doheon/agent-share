@@ -8,7 +8,7 @@
 
 const BASE = "https://api.github.com";
 
-export const ASH_REPO = "Doheon/ash";
+export const ASH_REPO = "Doheon/agent-share";
 
 export interface GitHubUser {
   login: string;
@@ -213,6 +213,19 @@ export async function createIssue(
 
 // The /issues/{n}/comments endpoint also works for PRs since GitHub treats PRs
 // as issues for general (non-review) comments.
+export async function addLabels(
+  repo: string,
+  number: number,
+  labels: string[],
+  token: string,
+): Promise<void> {
+  const res = await ghFetch(`/repos/${repo}/issues/${number}/labels`, token, {
+    method: "POST",
+    body: JSON.stringify({ labels }),
+  });
+  await jsonOrThrow(res, "addLabels");
+}
+
 export async function addIssueComment(
   repo: string,
   number: number,
