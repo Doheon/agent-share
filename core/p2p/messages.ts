@@ -7,6 +7,71 @@
  */
 
 import type { EarnEvent } from "../../shared/events.ts";
+import { MAX_BLOB_SIZE, MAX_BLOB_SIZE_B64 } from "../../shared/protocol.ts";
+
+const ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
+
+export function isValidId(id: unknown): id is string {
+  return typeof id === "string" && ID_RE.test(id);
+}
+
+const TASK_ID_TYPES = new Set([
+  "task:announce", "task:claim", "task:match", "task:blob_request",
+  "task:blob", "task:diff", "task:settle", "task:cancel", "task:log",
+  "spend:cosign", "earn:cosign", "mine:claim",
+]);
+
+const CLAIM_ID_TYPES = new Set(["mine:claim", "mine:cosign"]);
+
+/**
+ * Validate a parsed P2P message before delivering it to handlers. Drops
+ * messages with malformed task_id/claim_id (path-traversal, oversized,
+ * non-string), oversized blob announcements, and oversized blob payloads.
+ *
+ * Adversarial peers can craft any JSON they want — this is the single
+ * choke point that prevents downstream handlers from acting on garbage.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function isValidMessage(raw: any): boolean {
+  if (!raw || typeof raw !== "object" || typeof raw.type !== "string") return false;
+
+  if (TASK_ID_TYPES.has(raw.type) && !isValidId(raw.task_id)) return false;
+  if (CLAIM_ID_TYPES.has(raw.type) && !isValidId(raw.claim_id)) return false;
+
+  if (raw.type === "task:announce") {
+    if (typeof raw.blob_size !== "number" || !Number.isFinite(raw.blob_size)) return false;
+    if (raw.blob_size < 0 || raw.blob_size > MAX_BLOB_SIZE) return false;
+  }
+  if (raw.type === "task:blob") {
+    if (typeof raw.data !== "string" || raw.data.length > MAX_BLOB_SIZE_B64) return false;
+  }
+  if (raw.type === "task:log") {
+    // Cap log lines so a hostile peer cannot exhaust memory by spraying
+    // megabyte-sized log messages.
+    if (typeof raw.line !== "string" || raw.line.length > 16_384) return false;
+  }
+
+  return true;
+}
+
+/**
+ * Strip ANSI escape sequences and control characters from a log line that
+ * came in over the network. A malicious peer could otherwise inject CSI
+ * cursor moves, OSC 52 clipboard writes, terminal-title spoofing, or other
+ * sequences that hijack the requester's TTY. Apply to anything that
+ * crosses the network → terminal boundary.
+ */
+export function sanitizeLogLine(line: string): string {
+  return line
+    // CSI: ESC [ ... final byte
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    // OSC: ESC ] ... terminated by BEL or ESC \
+    .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, "")
+    // Other ESC sequences (single-char and intermediate)
+    .replace(/\x1b[@-Z\\-_]/g, "")
+    // C0 control chars except \t (0x09) and \n (0x0A); also DEL and C1
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+}
 
 export type MineAction =
   | "pr_create"

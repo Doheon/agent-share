@@ -1,0 +1,14 @@
+#!/bin/sh
+script="$0"
+while [ -L "$script" ]; do
+  target="$(readlink "$script")"
+  case "$target" in
+    /*) script="$target" ;;
+    *)  script="$(dirname "$script")/$target" ;;
+  esac
+done
+DIR="$(cd "$(dirname "$script")/.." && pwd)"
+exec node \
+  --import "$DIR/register.mjs" \
+  --import "file://$DIR/node_modules/tsx/dist/esm/index.mjs" \
+  "$DIR/cli/main.ts" "$@"

@@ -45,6 +45,7 @@ import { LEDGER_TOPIC } from "../../shared/constants.ts";
 import { splitFee } from "../../shared/policy.ts";
 import { AshSwarm, type SwarmPeer } from "../../core/p2p/swarm.ts";
 import type { P2PMessage } from "../../core/p2p/messages.ts";
+import { sanitizeLogLine } from "../../core/p2p/messages.ts";
 import type { Model } from "../../shared/types.ts";
 import { DEFAULT_MODEL_TIER, modelToAgent } from "../../shared/types.ts";
 import { CLIENT_VERSION } from "../../shared/protocol.ts";
@@ -387,7 +388,7 @@ function ChatApp({
           break;
         case "task:log":
           if (msg.task_id !== p.taskId || peer.id !== p.acceptorPeer?.id) return;
-          p.onLog?.(msg.line);
+          p.onLog?.(sanitizeLogLine(msg.line));
           break;
         case "task:diff":
           if (msg.task_id !== p.taskId || peer.id !== p.acceptorPeer?.id) return;
@@ -825,10 +826,26 @@ function ChatApp({
           }
         };
 
+        const mineConfirm = (prompt: string): Promise<boolean> => {
+          if (confirmResolveRef.current) {
+            // Another confirm is in flight (e.g. a parallel diff prompt). Refuse
+            // safely instead of overwriting the resolver.
+            addMsg(`  ⎿ ${prompt}  → blocked: another confirmation is active`, "#ff8888");
+            return Promise.resolve(false);
+          }
+          addMsg(`  ⎿ ${prompt} (y/n)`, "#ffcc44");
+          return new Promise<boolean>((resolve) => {
+            confirmResolveRef.current = (apply) => {
+              confirmResolveRef.current = null;
+              resolve(apply);
+            };
+          });
+        };
+
         mineActiveRef.current = true;
         (query
-          ? runIssueQueryCore(ctx, query, mineLogger)
-          : runMineCore(ctx, { count }, mineLogger)
+          ? runIssueQueryCore(ctx, query, mineLogger, mineConfirm)
+          : runMineCore(ctx, { count }, mineLogger, mineConfirm)
         ).then(async () => {
           const { balance: b } = await getLocalBalance(userId);
           setBalance(b);

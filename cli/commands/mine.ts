@@ -19,7 +19,7 @@
  */
 
 import { Command } from "commander";
-import { input } from "@inquirer/prompts";
+import { input, confirm as inquirerConfirm } from "@inquirer/prompts";
 import { mkdtemp, rm, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -60,6 +60,7 @@ import { spawn } from "../../core/util/spawn.ts";
 // ---------------------------------------------------------------------------
 
 export type Logger = (s: string) => void;
+export type ConfirmFn = (prompt: string) => Promise<boolean>;
 
 export interface MineContext {
   token: string;
@@ -381,16 +382,37 @@ function parseIssueQueryOutput(text: string): ParsedQueryIssue | null {
 // Git helpers
 // ---------------------------------------------------------------------------
 
-async function git(args: string[], cwd?: string): Promise<string> {
-  const proc = spawn(["git", ...args], { stdout: "pipe", stderr: "pipe", cwd });
+async function git(args: string[], cwd?: string, env?: Record<string, string>): Promise<string> {
+  const proc = spawn(["git", ...args], { stdout: "pipe", stderr: "pipe", cwd, env });
   const [code, stdout, stderr] = await Promise.all([proc.exited, proc.stdout, proc.stderr]);
   if (code !== 0) throw new Error(`git ${args[0]} failed: ${stderr.trim() || stdout.trim()}`);
   return stdout.trim();
 }
 
+/**
+ * Build git -c credential.helper args + env that supply the GitHub PAT
+ * without ever placing the token in argv (`ps` / `/proc/PID/cmdline` would
+ * leak it). The literal text `$ASH_GH_TOKEN` appears in argv; git invokes
+ * the helper as `sh -c <script>` which expands the variable from env at
+ * authentication time. The first empty `credential.helper=` clears any
+ * inherited helpers from system git config.
+ */
+function authedGit(token: string): { args: string[]; env: Record<string, string> } {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (typeof v === "string") env[k] = v;
+  }
+  env.ASH_GH_TOKEN = token;
+  const args = [
+    "-c", "credential.helper=",
+    "-c", `credential.helper=!f() { echo username=oauth2; echo "password=$ASH_GH_TOKEN"; }; f`,
+  ];
+  return { args, env };
+}
+
 async function pushBranch(repoDir: string, branch: string, cloneUrl: string, token: string): Promise<void> {
-  const authedUrl = cloneUrl.replace("https://", `https://oauth2:${token}@`);
-  await git(["push", authedUrl, `${branch}:${branch}`], repoDir);
+  const { args, env } = authedGit(token);
+  await git([...args, "push", cloneUrl, `${branch}:${branch}`], repoDir, env);
 }
 
 function hasTestChanges(stat: string): boolean {
@@ -553,6 +575,7 @@ async function doPrCreate(
   ghLogin: string,
   ghEmail: string,
   log: Logger,
+  confirm: ConfirmFn,
 ): Promise<boolean> {
   log(`\n  ${B}[pr_create]${R} #${issue.number} ${issue.title}\n`);
   log(`  ${D}${"─".repeat(56)}${R}\n`);
@@ -573,6 +596,8 @@ async function doPrCreate(
     }
 
     if (verdict.verdict === "close") {
+      const ok = await confirm(`Post close-recommend comment on issue #${issue.number}?`);
+      if (!ok) { log(`  ${YL}⚠${R}  Aborted by user.\n`); return false; }
       const body = `${CLOSE_REC_MARKER}\n${verdict.reason || "Recommend closing this issue."}\n\n---\n*Tagged: \`${MINE_LABEL}\`*`;
       const comment = await addIssueComment(ASH_REPO, issue.number, body, token);
       log(`  ${GR}✓${R}  Close recommended: ${comment.html_url}\n`);
@@ -620,6 +645,8 @@ async function doPrCreate(
     await git(["add", "-A"], tmpDir);
     await git(["commit", "-m", `fix: ${issue.title}\n\nResolves #${issue.number}\n\nImplemented via ash mine`], tmpDir);
 
+    const okPush = await confirm(`Push PR for issue #${issue.number} to your GitHub fork?`);
+    if (!okPush) { log(`  ${YL}⚠${R}  Aborted by user.\n`); return false; }
     log(`  ${D}pushing…${R}\n`);
     await pushBranch(tmpDir, branch, fork.clone_url, token);
 
@@ -652,6 +679,7 @@ async function doPrReview(
   myPub: string,
   privKey: import("node:crypto").KeyObject,
   log: Logger,
+  confirm: ConfirmFn,
 ): Promise<boolean> {
   log(`\n  ${B}[pr_review]${R} #${pr.number} ${pr.title}\n`);
   log(`  ${D}${"─".repeat(56)}${R}\n`);
@@ -674,6 +702,8 @@ async function doPrReview(
     log(`  ${D}${parsed.body.slice(0, 160)}…${R}\n\n`);
 
     if (parsed.verdict === "approve") {
+      const ok = await confirm(`Submit APPROVE review on PR #${pr.number}?`);
+      if (!ok) { log(`  ${YL}⚠${R}  Aborted by user.\n`); return false; }
       const review = await createPRReview(ASH_REPO, pr.number, parsed.body, "APPROVE", token);
       log(`  ${GR}✓${R}  Approved: ${review.html_url}\n`);
       await earnCredits({
@@ -689,6 +719,8 @@ async function doPrReview(
     }
 
     if (parsed.verdict === "changes_requested") {
+      const ok = await confirm(`Submit REQUEST_CHANGES review on PR #${pr.number}?`);
+      if (!ok) { log(`  ${YL}⚠${R}  Aborted by user.\n`); return false; }
       const review = await createPRReview(ASH_REPO, pr.number, parsed.body, "REQUEST_CHANGES", token);
       log(`  ${GR}✓${R}  Changes requested: ${review.html_url}\n`);
       await earnCredits({
@@ -704,6 +736,8 @@ async function doPrReview(
     }
 
     // close_recommend
+    const okClose = await confirm(`Post close-recommend review on PR #${pr.number}?`);
+    if (!okClose) { log(`  ${YL}⚠${R}  Aborted by user.\n`); return false; }
     const body = `${CLOSE_REC_MARKER}\n${parsed.body}\n\n---\n*Tagged: \`${MINE_LABEL}\`*`;
     const review = await createPRReview(ASH_REPO, pr.number, body, "COMMENT", token);
     log(`  ${GR}✓${R}  Close recommended: ${review.html_url}\n`);
@@ -732,6 +766,7 @@ async function doPrFix(
   ghLogin: string,
   ghEmail: string,
   log: Logger,
+  confirm: ConfirmFn,
 ): Promise<boolean> {
   log(`\n  ${B}[pr_fix:${mode}]${R} #${pr.number} ${pr.title}\n`);
   log(`  ${D}${"─".repeat(56)}${R}\n`);
@@ -750,8 +785,8 @@ async function doPrFix(
   const tmpDir = await mkdtemp(join(tmpdir(), "ash-fix-"));
   try {
     log(`  ${D}cloning ${headRepo}#${branch}…${R}\n`);
-    const authedUrl = headCloneUrl.replace("https://", `https://oauth2:${token}@`);
-    await git(["clone", "--depth=20", "--branch", branch, authedUrl, tmpDir]);
+    const { args: authArgs, env: authEnv } = authedGit(token);
+    await git([...authArgs, "clone", "--depth=20", "--branch", branch, headCloneUrl, tmpDir], undefined, authEnv);
     await git(["config", "user.name", ghLogin], tmpDir);
     await git(["config", "user.email", ghEmail], tmpDir);
 
@@ -776,6 +811,8 @@ async function doPrFix(
       : `chore: ${FIX_MARKER} self-review improvements`;
     await git(["commit", "-m", subject], tmpDir);
 
+    const okPush = await confirm(`Push fix commit to PR #${pr.number} (${mode})?`);
+    if (!okPush) { log(`  ${YL}⚠${R}  Aborted by user.\n`); return false; }
     log(`  ${D}pushing…${R}\n`);
     await pushBranch(tmpDir, branch, headCloneUrl, token);
 
@@ -803,6 +840,7 @@ async function doIssueQuery(
   myPub: string,
   privKey: import("node:crypto").KeyObject,
   log: Logger,
+  confirm: ConfirmFn,
 ): Promise<boolean> {
   log(`\n  ${B}[issue:query]${R} ${query}\n`);
   log(`  ${D}${"─".repeat(56)}${R}\n`);
@@ -837,7 +875,10 @@ async function doIssueQuery(
     }
 
     const fullBody = `${parsed.body}\n\n---\n*Reported via ash mine: "${query}"*`;
-    log(`  ${D}opening issue: ${B}${parsed.title}${R}\n`);
+    log(`  ${D}proposed title: ${B}${parsed.title}${R}\n`);
+    const ok = await confirm(`Open this issue on ${ASH_REPO}?`);
+    if (!ok) { log(`  ${YL}⚠${R}  Aborted by user.\n`); return false; }
+    log(`  ${D}opening issue…${R}\n`);
     const issue = await createIssue(ASH_REPO, parsed.title, fullBody, [parsed.label, MINE_LABEL], token);
     log(`  ${GR}✓${R}  Issue created: ${issue.html_url}\n`);
 
@@ -904,6 +945,7 @@ export async function runMineCore(
   ctx: MineContext,
   opts: { count: number },
   log: Logger,
+  confirm: ConfirmFn,
 ): Promise<void> {
   const { token, myPub, privKey, ghLogin, ghEmail } = ctx;
 
@@ -923,11 +965,11 @@ export async function runMineCore(
     try {
       let acted = false;
       if (decision.action === "pr_fix") {
-        acted = await doPrFix(decision.pr, decision.mode, decision.feedback, token, myPub, privKey, ghLogin, ghEmail, log);
+        acted = await doPrFix(decision.pr, decision.mode, decision.feedback, token, myPub, privKey, ghLogin, ghEmail, log, confirm);
       } else if (decision.action === "pr_review") {
-        acted = await doPrReview(decision.pr, token, myPub, privKey, log);
+        acted = await doPrReview(decision.pr, token, myPub, privKey, log, confirm);
       } else if (decision.action === "pr_create") {
-        acted = await doPrCreate(decision.issue, token, myPub, privKey, ghLogin, ghEmail, log);
+        acted = await doPrCreate(decision.issue, token, myPub, privKey, ghLogin, ghEmail, log, confirm);
       }
       if (!acted) break;
       done++;
@@ -945,13 +987,14 @@ export async function runIssueQueryCore(
   ctx: MineContext,
   query: string,
   log: Logger,
+  confirm: ConfirmFn,
 ): Promise<void> {
   const { token, myPub, privKey, ghLogin } = ctx;
 
   log(`\n  ${B}${CY}ash mine${R}  ${D}· query mode  · @${ghLogin}${R}\n`);
 
   try {
-    await doIssueQuery(query, token, myPub, privKey, log);
+    await doIssueQuery(query, token, myPub, privKey, log, confirm);
   } catch (err) {
     log(`  ${YL}⚠${R}  ${(err as Error).message}\n`);
   }
@@ -976,10 +1019,11 @@ export const mineCommand = new Command("mine")
     }
     const ctx = await loadCommonContext();
     if (!ctx) return;
+    const cliConfirm: ConfirmFn = (message) => inquirerConfirm({ message, default: false });
     const trimmed = query?.trim();
     const run = trimmed
-      ? runIssueQueryCore(ctx, trimmed, cliOut)
-      : runMineCore(ctx, { count: options.count as number }, cliOut);
+      ? runIssueQueryCore(ctx, trimmed, cliOut, cliConfirm)
+      : runMineCore(ctx, { count: options.count as number }, cliOut, cliConfirm);
     await run.catch((err: Error) => {
       console.error(`\nerror: ${err.message}\n`);
       process.exit(1);

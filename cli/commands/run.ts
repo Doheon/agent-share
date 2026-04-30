@@ -41,6 +41,7 @@ import { getCorestore } from "../../core/ledger/store.ts";
 import { LEDGER_TOPIC } from "../../shared/constants.ts";
 import { AshSwarm, type SwarmPeer } from "../../core/p2p/swarm.ts";
 import type { P2PMessage } from "../../core/p2p/messages.ts";
+import { sanitizeLogLine } from "../../core/p2p/messages.ts";
 import { DEFAULT_MODEL_TIER } from "../../shared/types.ts";
 import { splitFee } from "../../shared/policy.ts";
 import { ensureInitialized, NotInitializedError } from "../guard.ts";
@@ -188,7 +189,7 @@ export const runCommand = new Command("run")
         }
         case "task:log": {
           if (msg.task_id !== taskId || peer.id !== acceptorPeer?.id) return;
-          process.stdout.write("  " + msg.line + "\n");
+          process.stdout.write("  " + sanitizeLogLine(msg.line) + "\n");
           break;
         }
         case "task:diff": {

@@ -1,8 +1,9 @@
 import { dirname, join, normalize } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
 import { decryptData, importKey } from "../crypto/aes.ts";
+import { MAX_BLOB_SIZE } from "../../shared/protocol.ts";
 
-const MAX_EXTRACT_SIZE = 500 * 1024 * 1024; // 500MB
+const MAX_EXTRACT_SIZE = MAX_BLOB_SIZE;
 
 interface TarEntry {
   path: string;

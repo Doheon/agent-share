@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { rmSync } from "node:fs";
 import type { KeyObject } from "node:crypto";
 import type { P2PMessage } from "./messages.ts";
+import { isValidMessage } from "./messages.ts";
 import {
   signEd25519,
   verifyEd25519,
@@ -181,6 +182,10 @@ export class AshSwarm {
         }
 
         // ── Application message ────────────────────────────────────────────
+        // Validate before buffering or dispatching so adversarial peers cannot
+        // poison handler state with malformed task_id, oversized blobs, etc.
+        if (!isValidMessage(raw)) continue;
+
         if (!handshakeDone) {
           // Buffer messages that arrive before handshake completes.
           buffered.push(raw as P2PMessage);

@@ -2,8 +2,8 @@ import { readFile } from "node:fs/promises";
 import { walk } from "../util/walk.ts";
 import { encryptData, exportKey } from "../crypto/aes.ts";
 import { loadGitignorePatterns } from "../util/gitignore.ts";
+import { MAX_BLOB_SIZE } from "../../shared/protocol.ts";
 
-const MAX_BLOB_SIZE = 45 * 1024 * 1024;     // 45MB — conservative limit for P2P blob transfer
 const LARGE_FILE_WARN = 5 * 1024 * 1024;    // individual files >=5MB get reported on error
 
 function isIgnored(relPath: string, patterns: RegExp[]): boolean {

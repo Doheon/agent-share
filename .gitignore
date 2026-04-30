@@ -4,9 +4,10 @@
 # Node
 node_modules/
 
-# 빌드 결과물
-ash
-ash-*
+# 빌드 결과물 (root only — bin/ash is the launcher and must be tracked)
+/ash
+/ash-*
+*.tgz
 
 # 환경설정 (민감 정보)
 .env
