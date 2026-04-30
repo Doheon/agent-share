@@ -23,6 +23,7 @@
     "shared",
     "register.mjs",
     "loader.mjs",
+    "tsconfig.json",
     "README.md",
     "LICENSE"
   ],
@@ -39,10 +40,10 @@
     "commander": "^12",
     "corestore": "^7.9.2",
     "hypercore": "^11.28.1",
-    "hyperswarm": "latest",
+    "hyperswarm": "^4.17.0",
     "ink": "^7.0.1",
     "react": "^19",
-    "tsx": "latest"
+    "tsx": "^4.21.0"
   },
   "devDependencies": {
     "@types/node": "^22",
