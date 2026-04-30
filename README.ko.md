@@ -39,7 +39,7 @@ ash는 서버가 아닌 순수 피어투피어 네트워크입니다. 작업을 
 **핵심 속성:**
 
 - **종단간 암호화**: 코드와 diff는 AES-256-GCM으로 암호화. 피어들은 RSA-OAEP로 키 교환. 서버는 평문을 볼 수 없음.
-- **서명된 append-only 로그**: 각 피어는 로컬 Ed25519 서명 이벤트 로그를 `~/.ash/log/` 에 유지. 신원은 네트워크 간 이동 가능.
+- **서명된 append-only 로그**: 각 피어는 `~/.ash/corestore/`에 로컬 Ed25519 서명 Hypercore를 유지. 로그는 잔액 검증을 위해 P2P로 복제됨.
 - **샌드박스 실행**: 수락자들은 rootless Podman 컨테이너 (`--cap-drop=ALL`, `--read-only`)에서 AI 에이전트 실행.
 - **원자적 클레임**: 한 피어만 작업을 수락 가능. 정산은 원자적 — 수락자가 작업을 완료하면 크레딧 발급.
 
@@ -52,14 +52,14 @@ ash는 서버가 아닌 순수 피어투피어 네트워크입니다. 작업을 
 **필요:** Node.js 18+, git
 
 ```bash
-git clone https://github.com/Doheon/ash
-cd ash
+git clone https://github.com/Doheon/agent-share
+cd agent-share
 npm install
 npm install -g .
 ash init
 ```
 
-이 명령어는 `~/.ash/` 에 Ed25519 키페어와 설정을 생성합니다.
+이 명령어는 `~/.ash/`에 Ed25519 키페어, Corestore, 설정을 생성합니다.
 
 ---
 
@@ -73,13 +73,30 @@ ash init
 
 다음을 입력합니다:
 - 사용자명
-- 선호 AI 에이전트 (Claude, Codex)
+- 선호 AI 에이전트 (Claude Code 또는 Codex)
 - 환경 점검 (Podman/Docker, git 등)
+- 에이전트 로그인 (인증 안내 포함)
+
+### AI 에이전트 로그인
+
+```bash
+ash login
+```
+
+세 가지 프로바이더를 지원합니다:
+
+| 프로바이더 | 방식 |
+|-----------|------|
+| **GitHub** | OAuth Device Flow — 브라우저를 열고 인가될 때까지 폴링 |
+| **Claude Code** | `claude setup-token`으로 장기 토큰(`sk-ant-…`) 생성 후 입력 |
+| **Codex** | `~/.ash/codex-session`에 격리된 세션 생성 |
+
+TUI 안에서 `/login`으로도 로그인 가능합니다.
 
 ### 요청자 — AI 코딩 작업 의뢰
 
 ```bash
-# 인터랙티브 채팅 모드
+# 인터랙티브 채팅 모드 (TUI)
 ash
 
 # 또는 일회성 작업 제출
@@ -97,7 +114,7 @@ ash run "내 프로젝트에 TypeScript 타입 추가"
 ### 수락자 — 크레딧 획득
 
 ```bash
-# 5개 작업 수락 (AI 모드, 기본값)
+# 최대 5개 작업 수락 (기본 모델)
 ash serve -n 5
 
 # 무한정 수락
@@ -115,13 +132,41 @@ ash serve --allow-self
 5. diff 추출 및 반송
 6. 정산 크레딧 수신
 
+### GitHub 기여로 크레딧 획득
+
+```bash
+# 자동 사이클: 우선순위가 가장 높은 액션 실행
+ash mine
+
+# 한 세션에 최대 N개 액션 실행
+ash mine -n 3
+
+# 쿼리 모드: 코드베이스에서 증거를 찾아 GitHub 이슈 등록
+ash mine "history 커맨드가 mint 이벤트를 표시하지 않음"
+```
+
+**Mine 크레딧 표:**
+
+| 액션 | 크레딧 |
+|------|--------|
+| 이슈 구현 → PR 생성 | 6 (테스트 추가 시 +3) |
+| 이슈 종료 권고 | 2 |
+| PR 리뷰 → 승인 | 2 |
+| PR 리뷰 → 변경 요청 | 3 |
+| PR 리뷰 → 종료 권고 | 2 |
+| 자기 PR 자체 개선 | 4 |
+| 리뷰어 피드백 반영 | 5 |
+| 새 이슈 등록 (쿼리 모드) | 4 |
+
+TUI 안에서 `/mine` 슬래시 커맨드로도 사용 가능합니다.
+
 ### 잔액 확인
 
 ```bash
 ash status
 ```
 
-사용자명, 크레딧 잔액, 설정된 모델을 표시합니다.
+사용자명, 크레딧 잔액, pubkey, 각 AI 에이전트의 로그인 상태를 표시합니다.
 
 ---
 
@@ -134,11 +179,33 @@ ash status
 | `ash run "<프롬프트>"` | 일회성 작업 제출 |
 | `ash serve [-n N]` | 작업 수락 및 크레딧 획득 |
 | `ash serve --allow-self` | 자기 작업도 포함 (테스트용) |
-| `ash status` | 신원 및 잔액 표시 |
+| `ash status` | 신원, 잔액, 에이전트 로그인 상태 표시 |
 | `ash set <모델>` | 모델 티어 변경 (예: `claude-sonnet`) |
-| `ash login` | 세션 갱신 (필요시); TUI 안에서 `/login`으로도 사용 가능 |
+| `ash login [에이전트]` | GitHub, Claude Code, Codex 로그인 |
 | `ash setup` | 환경 재점검 |
-| `ash mine` | GitHub 기여로 크레딧 획득 |
+| `ash mine [-n N] [쿼리]` | GitHub 기여로 크레딧 획득 |
+| `ash history [pubkey]` | earn/spend/mint 이벤트 히스토리 표시 |
+| `ash peers` | 연결된 피어 및 잔액 목록 |
+
+---
+
+## TUI 슬래시 커맨드
+
+인터랙티브 채팅(`ash`) 안에서:
+
+| 커맨드 | 설명 |
+|--------|------|
+| `/serve [N]` | 서브 모드 진입 — 최대 N개 작업 수락 (생략 시 무제한) |
+| `/mine [N]` 또는 `/mine "<쿼리>"` | mine 액션 실행 또는 GitHub 이슈 등록 |
+| `/model [티어]` | 모델 인터랙티브 선택 또는 직접 변경 |
+| `/new` | 대화 기록 초기화, 새 대화 시작 |
+| `/status` | 계정 정보 표시 |
+| `/peers` | 연결된 피어 목록 |
+| `/history [pubkey]` | 이벤트 히스토리 표시 |
+| `/login [에이전트]` | GitHub, Claude Code, Codex 로그인 |
+| `/clear` | 채팅 스크롤백 초기화 |
+| `/help` | 사용 가능한 커맨드 표시 |
+| `/quit` | 종료 |
 
 ---
 
@@ -152,7 +219,7 @@ ash status
 | `SIGNUP_BONUS` | `100` | 신규 사용자 가입 보너스 크레딧 |
 | `FEE_BPS` | `0` | 플랫폼 수수료 (basis points, 100 bps = 1%) |
 | `TREASURY_PUBKEY` | `ADMIN_PUBKEY` | `FEE_BPS > 0`일 때 수수료 수령자 |
-| `MODEL_CREDITS` | haiku 8 · sonnet 15 · opus 25 · codex 15 | 작업당 크레딧 |
+| `MODEL_CREDITS` | haiku 2 · sonnet 6 · opus 30 · codex 2 | 작업당 크레딧 |
 
 ### 신규 사용자 온보딩 (자동)
 
@@ -204,10 +271,10 @@ ash admin watch-signups --bonus 50   # 오버라이드
 ### 신원 및 로그
 
 - **키페어**: Ed25519 at `~/.ash/keys/ed25519`
-- **이벤트 로그**: Append-only JSONL at `~/.ash/log/main.jsonl` (해시 체인, 서명)
+- **이벤트 로그**: 유저별 Hypercore at `~/.ash/corestore/` (append-only, Ed25519 서명, Hyperswarm으로 P2P 복제)
 - **설정**: 사용자명과 모델 티어 at `~/.ash/config.json`
 
-모든 이벤트 (작업 제출, 크레딧 획득, 정산)는 키페어로 서명되어 로그에 추가됩니다. 잔액은 로그를 리플레이해서 계산합니다.
+모든 이벤트 (작업 제출, 크레딧 획득, 정산)는 키페어로 서명되어 Hypercore에 추가됩니다. 잔액은 로그를 리플레이해서 계산합니다. 피어들은 작업 수락 전 잔액 검증을 위해 전용 `LEDGER_TOPIC`으로 서로의 core를 복제합니다.
 
 ### 피어 발견
 
@@ -243,9 +310,13 @@ ash admin watch-signups --bonus 50   # 오버라이드
 
 ### 잔액이 업데이트되지 않음
 
-1. 이벤트 로그 확인: `cat ~/.ash/log/main.jsonl | jq .`
+1. 이벤트 히스토리 확인: `ash history`
 2. 수락자가 작업 완료 확인 (샌드박스 오류 없음)
 3. 정산은 원자적 — 클레임 실패시 크레딧 미발급
+
+### 에이전트 로그인 만료
+
+`ash login` 또는 TUI 안에서 `/login`으로 갱신.
 
 ### Podman 오류
 

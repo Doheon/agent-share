@@ -39,11 +39,11 @@ You (requester)             Hyperswarm DHT              Peer (acceptor)
 **Key properties:**
 
 - **End-to-end encryption**: Code and diffs encrypted with AES-256-GCM. Peers exchange keys via RSA-OAEP. Server sees nothing.
-- **Signed append-only logs**: Each peer keeps a local Ed25519-signed event log at `~/.ash/log/`. Identity is portable across networks.
+- **Signed append-only logs**: Each peer keeps a local Ed25519-signed Hypercore at `~/.ash/corestore/`. Logs are replicated peer-to-peer for balance verification.
 - **Sandboxed execution**: Acceptors run AI agents in rootless Podman containers (`--cap-drop=ALL`, `--read-only`).
 - **Atomic claims**: Only one peer can accept a task. Settlement is atomic — credits are issued when the acceptor completes work.
 
-> **Security note**: Acceptors can read your code in plaintext. Do not submit company code or anything covered by NDA.
+> **Security note**: Acceptors can read your code in plaintext inside the sandbox. Do not submit company code or anything covered by NDA.
 
 ---
 
@@ -52,14 +52,14 @@ You (requester)             Hyperswarm DHT              Peer (acceptor)
 **Requirements:** Node.js 18+, git
 
 ```bash
-git clone https://github.com/Doheon/ash
-cd ash
+git clone https://github.com/Doheon/agent-share
+cd agent-share
 npm install
 npm install -g .
 ash init
 ```
 
-This creates `~/.ash/` with your Ed25519 keypair and configuration.
+This creates `~/.ash/` with your Ed25519 keypair, Corestore, and configuration.
 
 ---
 
@@ -73,13 +73,30 @@ ash init
 
 Prompts for:
 - Username
-- Preferred AI agent (Claude, Codex)
+- Preferred AI agent (Claude Code or Codex)
 - Environment checks (Podman/Docker, git, etc.)
+- Agent login (guides you through authentication)
+
+### Log in to AI agents
+
+```bash
+ash login
+```
+
+Supports three providers:
+
+| Provider | Method |
+|----------|--------|
+| **GitHub** | OAuth Device Flow — opens browser, poll until authorized |
+| **Claude Code** | Run `claude setup-token` to generate a long-lived `sk-ant-…` token |
+| **Codex** | Creates an isolated session at `~/.ash/codex-session` |
+
+You can also log in from within the TUI with `/login`.
 
 ### As a requester — get AI coding work done
 
 ```bash
-# Interactive chat mode
+# Interactive chat mode (TUI)
 ash
 
 # Or submit a one-shot task
@@ -97,13 +114,13 @@ Your code is packaged, encrypted, and announced to the P2P network. When a peer 
 ### As an acceptor — earn credits
 
 ```bash
-# Serve 5 tasks (AI mode, default)
+# Serve up to 5 tasks (default model)
 ash serve -n 5
 
 # Serve indefinitely
 ash serve
 
-# Serve all tasks, including your own (local testing)
+# Serve your own tasks too (local testing)
 ash serve --allow-self
 ```
 
@@ -115,13 +132,41 @@ When a task is available:
 5. Extract and send back the diff
 6. Receive settlement credits
 
+### Earn credits via GitHub contributions
+
+```bash
+# Auto-cycle: pick the highest-priority action and execute
+ash mine
+
+# Run up to N actions in one session
+ash mine -n 3
+
+# Query mode: file a GitHub issue if evidence is found in the codebase
+ash mine "the history command doesn't show mint events"
+```
+
+**Mine credit table:**
+
+| Action | Credits |
+|--------|---------|
+| Implement issue → open PR | 6 (+3 if tests added) |
+| Recommend closing issue | 2 |
+| Review PR → approve | 2 |
+| Review PR → request changes | 3 |
+| Review PR → close recommend | 2 |
+| Self-improve own PR | 4 |
+| Address reviewer feedback on own PR | 5 |
+| File a new issue (query mode) | 4 |
+
+`/mine` is also available as a slash command inside the TUI.
+
 ### Check balance
 
 ```bash
 ash status
 ```
 
-Shows your username, credit balance, and configured model.
+Shows your username, credit balance, pubkey, and login status for each AI agent.
 
 ---
 
@@ -134,11 +179,33 @@ Shows your username, credit balance, and configured model.
 | `ash run "<prompt>"` | Submit a one-shot task |
 | `ash serve [-n N]` | Accept tasks and earn credits |
 | `ash serve --allow-self` | Include your own tasks (testing) |
-| `ash status` | Show identity and balance |
+| `ash status` | Show identity, balance, and agent login status |
 | `ash set <model>` | Set model tier (e.g., `claude-sonnet`) |
-| `ash login` | Refresh session (if needed); also available as `/login` inside the TUI |
+| `ash login [agent]` | Log in to GitHub, Claude Code, or Codex |
 | `ash setup` | Re-run environment checks |
-| `ash mine` | Earn credits from GitHub contributions |
+| `ash mine [-n N] [query]` | Earn credits via GitHub contributions |
+| `ash history [pubkey]` | Show earn/spend/mint event history |
+| `ash peers` | List connected peers and their balances |
+
+---
+
+## TUI slash commands
+
+Inside the interactive chat (`ash`):
+
+| Command | Purpose |
+|---------|---------|
+| `/serve [N]` | Enter serve mode — accept up to N tasks (omit for unlimited) |
+| `/mine [N]` or `/mine "<query>"` | Run mine actions or file a GitHub issue |
+| `/model [tier]` | Switch model interactively or directly |
+| `/new` | Clear turn history, start a fresh conversation |
+| `/status` | Show account info |
+| `/peers` | List connected peers |
+| `/history [pubkey]` | Show event history |
+| `/login [agent]` | Log in to GitHub, Claude Code, or Codex |
+| `/clear` | Clear chat scrollback |
+| `/help` | Show available commands |
+| `/quit` | Exit |
 
 ---
 
@@ -152,7 +219,7 @@ with the package. Changing any value is a minor-release event.
 | `SIGNUP_BONUS` | `100` | Credits issued to each new user on request |
 | `FEE_BPS` | `0` | Platform fee in basis points (100 bps = 1%) |
 | `TREASURY_PUBKEY` | `ADMIN_PUBKEY` | Receives fees when `FEE_BPS > 0` |
-| `MODEL_CREDITS` | haiku 8 · sonnet 15 · opus 25 · codex 15 | Credit cost per task |
+| `MODEL_CREDITS` | haiku 2 · sonnet 6 · opus 30 · codex 2 | Credit cost per task |
 
 ### New user onboarding (automatic)
 
@@ -206,10 +273,10 @@ admin mint or a real counterparty transaction:
 ### Identity and logs
 
 - **Keypair**: Ed25519 at `~/.ash/keys/ed25519`
-- **Event log**: Append-only JSONL at `~/.ash/log/main.jsonl` (hash-chained, signed)
+- **Event log**: Per-user Hypercore in `~/.ash/corestore/` (append-only, Ed25519-signed, replicated over Hyperswarm)
 - **Config**: Username and model tier at `~/.ash/config.json`
 
-Each event (task submission, credit earn, settlement) is signed by your keypair and appended. Balance is derived by replaying the log.
+Each event (task submission, credit earn, settlement) is signed by your keypair and appended to your Hypercore. Balance is derived by replaying the log. Peers replicate each other's cores over a dedicated `LEDGER_TOPIC` to verify balances before accepting tasks.
 
 ### Peer discovery
 
@@ -245,9 +312,13 @@ Check that:
 
 ### Balance not updating
 
-1. Check the event log: `cat ~/.ash/log/main.jsonl | jq .`
+1. Check event history: `ash history`
 2. Ensure the acceptor completed the task (no errors in sandbox)
 3. Settlement is atomic — if claim failed, credits aren't issued
+
+### Agent login expired
+
+Run `ash login` or `/login` inside the TUI to refresh credentials.
 
 ### Podman errors
 
