@@ -82,17 +82,28 @@ async function replayBalance(core: any, ownerPubkeyHex: string, startingBalance 
   // produces exactly one earn per task_id. A duplicate earn for the same
   // task_id is either a buggy retry or a deliberate inflation attack.)
   const seenEarnTaskIds = new Set<string>();
+  // Same protection for spend events: Hypercore append is non-idempotent,
+  // so a sign-then-retry race could land two identical SpendEvents in
+  // the log. Without this dedupe the user would be double-debited.
+  const seenSpendNonces = new Set<number>();
   for (let i = 0; i < len; i++) {
     try {
       const raw = await core.get(i) as string;
       const event = JSON.parse(raw) as Event;
+      // Only `spend` and `earn` move balance. Other event types
+      // (`signup`, `mint`, `policy_update`, `task_*`) are recorded for
+      // audit and replay-time signature checks but contribute zero to
+      // the running balance — by design. Adding a new balance-affecting
+      // event type means adding a case here.
       if (event.type === "spend") {
+        if (seenSpendNonces.has(event.nonce)) continue;
         const ok = verifyEd25519(
           canonicalStringify(eventWithoutSignature(event)),
           event.signature,
           ownerPubKey,
         );
         if (!ok) continue;
+        seenSpendNonces.add(event.nonce);
         // Negative balance is allowed: it exposes fraudulent spends instead
         // of silently masking them (a skipped spend still lets the
         // counterparty claim the earn via cross-ref — so skipping creates an

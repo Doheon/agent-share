@@ -211,6 +211,7 @@ ash status
 | `ash mine [-n N] [쿼리]` | GitHub 기여로 크레딧 획득 |
 | `ash history [pubkey]` | earn/spend/mint 이벤트 히스토리 표시 |
 | `ash peers` | 연결된 피어 및 잔액 목록 |
+| `ash peers --forget <pubkey>` | 오래된 ledger-key 매핑 제거 (피어가 corestore를 초기화한 경우) |
 
 ---
 

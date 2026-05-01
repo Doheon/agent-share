@@ -391,7 +391,9 @@ function parseIssueQueryOutput(text: string): ParsedQueryIssue | null {
 function redactGitOutput(s: string): string {
   return s
     .replace(/oauth2:[^@\s]+@/g, "oauth2:***@")
-    .replace(/gh[ps]_[A-Za-z0-9_]{20,}/g, "gh*_***")
+    // gh{p|s|u|r|o}_ covers classic PAT, server-to-server, user-to-server
+    // OAuth, refresh token, and OAuth-app token formats.
+    .replace(/gh[psuro]_[A-Za-z0-9_]{20,}/g, "gh*_***")
     .replace(/github_pat_[A-Za-z0-9_]+/g, "github_pat_***");
 }
 
@@ -402,7 +404,10 @@ async function git(args: string[], cwd?: string, env?: Record<string, string>): 
     const detail = redactGitOutput(stderr.trim() || stdout.trim());
     throw new Error(`git ${args[0]} failed: ${detail}`);
   }
-  return stdout.trim();
+  // Always redact: even successful commands echo "remote: ..." lines on
+  // stderr that can include credential URLs (rare, but the cost of
+  // running the regex on success is negligible).
+  return redactGitOutput(stdout.trim());
 }
 
 /**
@@ -414,14 +419,34 @@ async function git(args: string[], cwd?: string, env?: Record<string, string>): 
  * inherited helpers from system git config.
  */
 function authedGit(token: string): { args: string[]; env: Record<string, string> } {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
+  // Allowlist env, never inherit secrets. Cloning untrusted PR heads
+  // can install repo-local hooks (`.git/hooks/post-checkout`,
+  // `core.hooksPath`); a malicious head branch's hook would otherwise
+  // run with the user's full env (ANTHROPIC_API_KEY, AWS_*, etc.).
+  // We also disable hooks at the git config level for defense in depth.
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HOME: process.env.HOME ?? "/tmp",
+    LANG: process.env.LANG ?? "C",
+    TERM: process.env.TERM ?? "dumb",
+    ASH_GH_TOKEN: token,
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  // Preserve the user's git identity vars if set (otherwise `git commit`
+  // fails with "no email" on systems without ~/.gitconfig).
+  for (const k of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]) {
+    const v = process.env[k];
     if (typeof v === "string") env[k] = v;
   }
-  env.ASH_GH_TOKEN = token;
   const args = [
     "-c", "credential.helper=",
     "-c", `credential.helper=!f() { echo username=oauth2; echo "password=$ASH_GH_TOKEN"; }; f`,
+    // Disable repo-local hooks so a malicious `.git/hooks/...` from a
+    // cloned PR head cannot exfiltrate the env we just sanitized.
+    "-c", "core.hooksPath=/dev/null",
+    // Restrict url protocols so a hostile submodule URL can't run a
+    // helper binary out of the user's PATH.
+    "-c", "protocol.allow=user",
   ];
   return { args, env };
 }

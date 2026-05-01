@@ -84,13 +84,29 @@ export async function createKeyPair(userId: string): Promise<RsaKeyPair> {
 
 export async function loadPrivateKey(userId: string): Promise<CryptoKey> {
   // Pull the file from the legacy path on first run after upgrade.
+  // The migrate function logs to stderr on failure; we use its return
+  // value to decide which error to surface so the user gets the right
+  // recovery instructions (don't tell them to "run ash setup" if a
+  // legacy key still exists at ~/.agent-share/keys — that would
+  // discard their identity).
+  let migrationFailed = false;
   if (!(await exists(keyPath(userId)))) {
-    await migrateLegacyIfPresent(userId);
+    if (await exists(legacyKeyPath(userId))) {
+      const migrated = await migrateLegacyIfPresent(userId);
+      if (!migrated) migrationFailed = true;
+    }
   }
   let pem: string;
   try {
     pem = await readFile(keyPath(userId), "utf-8");
   } catch {
+    if (migrationFailed) {
+      throw new Error(
+        `Private key not loaded: legacy migration to ${keyPath(userId)} failed.\n` +
+        `  See the warning above. Move the file manually before retrying.\n` +
+        `  Do NOT run \`ash setup\` — it will create a new keypair and abandon your existing identity.`,
+      );
+    }
     throw new Error(
       `Private key not found: ${keyPath(userId)}\nPlease run ash setup first.`,
     );

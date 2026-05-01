@@ -211,6 +211,7 @@ Shows your username, credit balance, pubkey, and login status for each AI agent.
 | `ash mine [-n N] [query]` | Earn credits via GitHub contributions |
 | `ash history [pubkey]` | Show earn/spend/mint event history |
 | `ash peers` | List connected peers and their balances |
+| `ash peers --forget <pubkey>` | Drop a stale ledger-key mapping (use after a peer resets their corestore) |
 
 ---
 

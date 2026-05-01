@@ -18,7 +18,7 @@ export interface LoginScreenProps {
 type Step =
   | { kind: "provider"; idx: number }
   | { kind: "github"; phase: "init" }
-  | { kind: "github"; phase: "waiting"; userCode: string; verificationUri: string; deviceCode: string; interval: number }
+  | { kind: "github"; phase: "waiting"; userCode: string; verificationUri: string; deviceCode: string; interval: number; expiresIn: number }
   | { kind: "github"; phase: "error"; error: string }
   | { kind: "claude"; buf: string; cursorPos: number; busy: boolean; error?: string; hasBin: boolean | null }
   | { kind: "codex"; busy: boolean; error?: string; hasBin: boolean | null };
@@ -74,6 +74,7 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
   const githubPhase      = step.kind === "github" ? step.phase : null;
   const githubDeviceCode = step.kind === "github" && step.phase === "waiting" ? step.deviceCode : null;
   const githubInterval   = step.kind === "github" && step.phase === "waiting" ? step.interval : 5;
+  const githubExpiresIn  = step.kind === "github" && step.phase === "waiting" ? step.expiresIn : 900;
   const binKind          = step.kind === "claude" || step.kind === "codex" ? step.kind : null;
   const hasBin           = step.kind === "claude" || step.kind === "codex" ? step.hasBin : null;
 
@@ -103,6 +104,7 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
           verificationUri: String(data.verification_uri),
           deviceCode: String(data.device_code),
           interval: typeof data.interval === "number" ? data.interval : 5,
+          expiresIn: typeof data.expires_in === "number" ? data.expires_in : 900,
         });
       })
       .catch(() => {
@@ -116,16 +118,41 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
   useEffect(() => {
     if (!githubDeviceCode) return;
     let cancelled = false;
-    let currentMs = githubInterval * 1000;
+    // Floor poll interval at 5s so a hostile mitm-ed `interval: 0`
+    // response can't induce a tight CPU loop.
+    let currentMs = Math.max(githubInterval * 1000, 5000);
+    // Honor the device-code expiry. GitHub typically returns
+    // expires_in: 900 (15 min). Stop polling at that wall-clock cutoff
+    // even if the server keeps returning authorization_pending — a
+    // captive portal could otherwise keep us polling forever.
+    const expiresAt = Date.now()
+      + Math.min(typeof githubExpiresIn === "number" ? githubExpiresIn : 900, 1800) * 1000;
     // Track the pending timeout so cleanup can clear it. Without this
     // a cancelled effect (re-render with a new device code) leaks the
     // timer chain into the background, eventually racing with the new
     // chain.
     let timer: ReturnType<typeof setTimeout> | null = null;
 
+    // Schedule a follow-up poll only if we haven't been cancelled. The
+    // scheduling happens after `await fetch` resolves, so we MUST guard
+    // against cleanup having fired during that await — without this
+    // guard a ghost setTimeout could fire after unmount.
+    const reschedule = () => {
+      if (cancelled || !mountedRef.current) return;
+      if (Date.now() > expiresAt) {
+        setStep({ kind: "github", phase: "error", error: "code expired — press enter to try again" });
+        return;
+      }
+      timer = setTimeout(poll, currentMs);
+    };
+
     const poll = async () => {
       timer = null;
       if (cancelled || !mountedRef.current) return;
+      if (Date.now() > expiresAt) {
+        setStep({ kind: "github", phase: "error", error: "code expired — press enter to try again" });
+        return;
+      }
       try {
         const res = await fetch("https://github.com/login/oauth/access_token", {
           method: "POST",
@@ -149,10 +176,9 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
         if (data.error === "expired_token") { setStep({ kind: "github", phase: "error", error: "code expired — press enter to try again" }); return; }
         if (data.error === "access_denied") { setStep({ kind: "github", phase: "error", error: "access denied" }); return; }
         // authorization_pending or slow_down: keep polling.
-        timer = setTimeout(poll, currentMs);
+        reschedule();
       } catch {
-        if (cancelled || !mountedRef.current) return;
-        timer = setTimeout(poll, currentMs);
+        reschedule();
       }
     };
 
@@ -230,11 +256,16 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
             clearTimeout(timer);
             if (!mountedRef.current) return;
             if (res.status === 401 || res.status === 403) {
-              setStep((s) => s.kind === "claude" ? { ...s, busy: false, error: "token rejected by Anthropic API" } : s);
+              setStep((s) => s.kind === "claude" ? { ...s, busy: false, buf: "", error: "token rejected by Anthropic API" } : s);
               return;
             }
             await saveAgentToken(token);
             await saveAgent("claude");
+            // Clear the in-memory token buffer immediately so a future
+            // heap dump (e.g. crash report, --inspect debugger) cannot
+            // recover the sk-ant-... value. The token is now persisted
+            // to disk with mode 0600 via saveAgentToken.
+            setStep((s) => s.kind === "claude" ? { ...s, buf: "" } : s);
             onClose({ kind: "claude", label: "Claude Code" });
           })
           .catch((err: unknown) => {
@@ -242,7 +273,7 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
             if (!mountedRef.current) return;
             const isTimeout = err instanceof Error && err.name === "AbortError";
             setStep((s) => s.kind === "claude"
-              ? { ...s, busy: false, error: isTimeout
+              ? { ...s, busy: false, buf: "", error: isTimeout
                   ? "verification timed out — check network and retry"
                   : "network error — check connection and retry" }
               : s);

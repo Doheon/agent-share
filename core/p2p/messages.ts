@@ -50,6 +50,13 @@ export function isValidMessage(raw: any): boolean {
     // megabyte-sized log messages.
     if (typeof raw.line !== "string" || raw.line.length > 16_384) return false;
   }
+  if (raw.type === "task:settle") {
+    // The TypeScript discriminated union is compile-time only; without
+    // a runtime check a peer can send `action: "<arbitrary>"` and the
+    // receiver's settleAction promise resolves to a junk value that
+    // bypasses both the approve and reject branches. Lock it down.
+    if (raw.action !== "approve" && raw.action !== "reject") return false;
+  }
 
   return true;
 }

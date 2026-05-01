@@ -41,7 +41,7 @@ test("detects GitHub Personal Access Token (ghp_...)", async () => {
     );
     const results = await scanDirectory(dir);
     const patterns = results.map((r) => r.pattern);
-    expect(patterns.includes("GitHub Personal Access Token")).toEqual(true);
+    expect(patterns.some((p) => p.startsWith("GitHub Token"))).toEqual(true);
   } finally {
     await cleanup(dir);
   }
@@ -56,7 +56,7 @@ test("detects GitHub App Token (ghs_...)", async () => {
     );
     const results = await scanDirectory(dir);
     const patterns = results.map((r) => r.pattern);
-    expect(patterns.includes("GitHub App Token")).toEqual(true);
+    expect(patterns.some((p) => p.startsWith("GitHub Token"))).toEqual(true);
   } finally {
     await cleanup(dir);
   }

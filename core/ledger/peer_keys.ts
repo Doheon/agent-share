@@ -39,6 +39,30 @@ export async function getPeerLedgerKey(pubkey: string): Promise<string | undefin
   return c[pubkey];
 }
 
+/**
+ * Drops the cached entry for a pubkey. Use when you know the peer has
+ * rotated their ledger core (e.g. they reset their corestore) and the
+ * stale entry would otherwise shadow their new one indefinitely under
+ * first-write-wins.
+ */
+export async function forgetPeerLedgerKey(pubkey: string): Promise<void> {
+  if (!pubkey) return;
+  const c = await loadCache();
+  if (!c[pubkey]) return;
+  delete c[pubkey];
+  const snapshot = { ...c };
+  writeQueue = writeQueue
+    .catch(() => undefined)
+    .then(async () => {
+      await mkdir(dirname(PEER_KEYS_PATH), { recursive: true, mode: 0o700 });
+      await writeFile(PEER_KEYS_PATH, JSON.stringify(snapshot, null, 2), {
+        mode: 0o600,
+        encoding: "utf8",
+      });
+    });
+  await writeQueue.catch(() => undefined);
+}
+
 const PUBKEY_RE = /^[0-9a-f]{64}$/;
 const CORE_KEY_RE = /^[0-9a-f]{64}$/;
 
@@ -62,8 +86,15 @@ export async function registerPeerLedgerKey(
   writeQueue = writeQueue
     .catch(() => undefined)
     .then(async () => {
-      await mkdir(dirname(PEER_KEYS_PATH), { recursive: true });
-      await writeFile(PEER_KEYS_PATH, JSON.stringify(snapshot, null, 2), "utf8");
+      // Restrictive mode: this file is the user's social graph
+      // (which pubkeys they've discovered, which Hypercores those
+      // pubkeys publish). Default 0644 would leak it to other local
+      // users on shared systems.
+      await mkdir(dirname(PEER_KEYS_PATH), { recursive: true, mode: 0o700 });
+      await writeFile(PEER_KEYS_PATH, JSON.stringify(snapshot, null, 2), {
+        mode: 0o600,
+        encoding: "utf8",
+      });
     });
   await writeQueue.catch(() => undefined);
 }

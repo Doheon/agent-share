@@ -48,6 +48,8 @@ import { getCorestore } from "../../core/ledger/store.ts";
 import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
 import { LEDGER_TOPIC } from "../../shared/constants.ts";
 import { signEd25519, verifyEd25519, rawHexToPublicKey } from "../../core/crypto/ed25519.ts";
+// signEd25519 is used in the cosigner-side mine:claim handler (~line 506);
+// kept here so the cosign signing path doesn't have to re-import it.
 import { canonicalStringify } from "../../shared/canonical.ts";
 import { eventWithoutSignature } from "../../shared/events.ts";
 import { fetchPR, fetchPRReviews, fetchIssue, ASH_REPO } from "../../core/github/client.ts";
@@ -108,6 +110,18 @@ export async function processTask(
 ): Promise<{ earned: number }> {
   const agent = modelToAgent(modelTier);
   let earned = 0;
+
+  // Refuse work for tiers that aren't in MODEL_CREDITS — otherwise
+  // `MODEL_CREDITS[modelTier] ?? 0` would yield 0 for both `fullCredits`
+  // and `halfCredits`, `validAmount(0)` would be true, and the
+  // acceptor would do the work for free. The peer-side `model !== opts.modelTier`
+  // filter normally prevents this from being exploitable across stock
+  // builds, but a forked client could match on a custom tier string.
+  if (MODEL_CREDITS[modelTier] === undefined) {
+    logger(`  ${YL}⚠${R}  unknown model tier '${modelTier}' — rejecting task\n`);
+    active.peer.send({ type: "task:settle", task_id: active.taskId, action: "reject" });
+    throw new Error(`unknown model tier: ${modelTier}`);
+  }
 
   // Re-validate agent credentials at the start of every task. Tokens can
   // expire mid-session; without this check the acceptor would burn the
@@ -312,6 +326,24 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
   const myPub: string = cfg.pubkey;
   const agent = modelToAgent(opts.modelTier);
 
+  // Per-peer rate limit on mine:claim verification — each call burns a
+  // GitHub authenticated request, capped 5000/hr. 10 claims/min/peer
+  // is generous for legitimate miners and survives a full hour of
+  // sustained spam from a single hostile peer.
+  const claimsByPeer = new Map<string, { count: number; windowStart: number }>();
+  const seenMineClaimIds = new Set<string>();
+  const allowMineClaim = (pubkey: string): boolean => {
+    const now = Date.now();
+    const slot = claimsByPeer.get(pubkey);
+    if (!slot || now - slot.windowStart > 60_000) {
+      claimsByPeer.set(pubkey, { count: 1, windowStart: now });
+      return true;
+    }
+    if (slot.count >= 10) return false;
+    slot.count++;
+    return true;
+  };
+
   // The sandbox uses a separately-stored long-lived token (claude) or an
   // isolated codex session, not the host CLI login. Validate that token /
   // session against the real service before joining the swarm — otherwise we
@@ -454,6 +486,16 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
     if (msg.type === "mine:claim") {
       if (msg.claimant_pubkey !== peer.pubkey) return; // reject spoofed claimant identity
       if (msg.claimant_pubkey === myPub) return; // don't self-cosign
+      // Rate-limit per claimant_pubkey: each `fetchPR`/`fetchIssue`
+      // call below burns a slot of the user's GitHub authenticated
+      // hourly cap (5,000/hr). Without this a hostile peer could
+      // sustain ~80 claims/sec and exhaust the cap, denying both
+      // mine and serve flows that depend on the same token.
+      if (!allowMineClaim(peer.pubkey)) return;
+      // Dedup by claim_id so the same claim cannot be replayed to
+      // amplify the verification load.
+      if (seenMineClaimIds.has(msg.claim_id)) return;
+      seenMineClaimIds.add(msg.claim_id);
       const ghToken = cfg.githubToken ?? process.env.GITHUB_TOKEN;
       if (!ghToken) return; // can't verify without a token
 

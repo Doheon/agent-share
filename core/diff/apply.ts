@@ -30,17 +30,44 @@ export interface ApplyResult {
  * `git apply` itself blocks these paths since 2.39 with `apply.useBuiltin`,
  * but pinning the user's git version is out of our control. Reject at
  * the wire boundary before invoking git.
+ *
+ * `getChangedFiles` only inspects `diff --git` headers, but git apply
+ * also honors patches whose only header is `--- a/x\n+++ b/y` (no
+ * `diff --git` line). Scan ALL plus/minus headers and strip CRLF /
+ * trailing whitespace so attackers can't smuggle paths past the check
+ * by appending `\r` (which git apply trims but our string check
+ * preserves).
  */
+function allHeaderPaths(patch: string): string[] {
+  const out: string[] = [];
+  for (const rawLine of patch.split("\n")) {
+    const line = rawLine.replace(/\r$/, "").trimEnd();
+    let m;
+    if ((m = line.match(/^diff --git a\/.+ b\/(.+)$/))) out.push(m[1]!);
+    else if ((m = line.match(/^\+\+\+ b\/(.+?)(?:\t.*)?$/))) out.push(m[1]!);
+    else if ((m = line.match(/^--- a\/(.+?)(?:\t.*)?$/))) out.push(m[1]!);
+    // /dev/null on either side is normal for create/delete; skip.
+    else if ((m = line.match(/^\+\+\+ (.+?)(?:\t.*)?$/)) && m[1] !== "/dev/null") out.push(m[1]!);
+    else if ((m = line.match(/^--- (.+?)(?:\t.*)?$/)) && m[1] !== "/dev/null") out.push(m[1]!);
+  }
+  return out;
+}
+
 function unsafePathsIn(patch: string): string[] {
   const bad: string[] = [];
-  for (const f of getChangedFiles(patch)) {
+  for (const raw of allHeaderPaths(patch)) {
+    const f = raw.replace(/\r/g, "").trim();
     if (
+      !f ||
       f.startsWith(".git/") ||
       f.startsWith("/") ||
       f.includes("..") ||
-      f.includes(".git/")
+      f.includes(".git/") ||
+      // Embedded control chars (would let an attacker hide path
+      // segments past a simple substring check).
+      /[\x00-\x1f\x7f]/.test(f)
     ) {
-      bad.push(f);
+      bad.push(f || "(empty)");
     }
   }
   return bad;

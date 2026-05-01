@@ -1,6 +1,25 @@
 import { test, expect } from "vitest";
 import { canonicalStringify } from "./canonical.ts";
 
+// Regression tests for surrogate-pair handling. A relay re-decoding
+// JSON as UTF-8 would replace lone surrogates with U+FFFD, breaking
+// signature verification cross-host — canonicalize must reject them.
+test("rejects lone high surrogate", () => {
+  expect(() => canonicalStringify("\uD800")).toThrow(/lone high surrogate/);
+});
+
+test("rejects lone low surrogate", () => {
+  expect(() => canonicalStringify("\uDC00")).toThrow(/lone low surrogate/);
+});
+
+test("rejects lone surrogate inside an object value", () => {
+  expect(() => canonicalStringify({ x: "\uD83D" })).toThrow(/lone high surrogate/);
+});
+
+test("accepts a valid surrogate pair (emoji)", () => {
+  expect(canonicalStringify({ x: "🚀" })).toBe('{"x":"🚀"}');
+});
+
 test("primitives", () => {
   expect(canonicalStringify(null)).toBe("null");
   expect(canonicalStringify(true)).toBe("true");

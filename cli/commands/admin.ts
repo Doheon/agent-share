@@ -226,7 +226,14 @@ async function peerHasSignupEvent(
       core.update(),
       new Promise<void>((r) => setTimeout(r, timeoutMs)),
     ]);
-    const len: number = core.length ?? 0;
+    // Cap the scan at the first SIGNUP_SCAN_LIMIT entries. A real
+    // SignupEvent is appended in `ash init` BEFORE the user does
+    // anything else, so a legitimate user has it within the first
+    // handful of blocks. A hostile peer could publish a multi-GB core
+    // whose only valid signup sits at index 999_999 to DoS the
+    // watcher (memory + bandwidth). Capping here bounds the cost.
+    const SIGNUP_SCAN_LIMIT = 64;
+    const len: number = Math.min(core.length ?? 0, SIGNUP_SCAN_LIMIT);
     for (let i = 0; i < len; i++) {
       try {
         const raw = await core.get(i) as string;
@@ -251,14 +258,53 @@ async function peerHasSignupEvent(
  * Appends a signup MintEvent to the admin's Hypercore under a file lock.
  * The caller must have verified that `recipientPubkey` is eligible.
  */
+async function acquireMintLock(lockFile: string): Promise<import("node:fs/promises").FileHandle> {
+  // PID-based stale detection: if the lock exists but the writing
+  // process is gone, reclaim it. Without this, an admin process
+  // killed by SIGKILL leaves the lock file behind and every
+  // subsequent mint fails with EEXIST forever.
+  try {
+    return await open(lockFile, "wx");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+  // Read the existing lock; if it contains a PID we can probe, see
+  // if that process is alive.
+  let stalePid = 0;
+  try {
+    const content = (await readFile(lockFile, "utf-8")).trim();
+    stalePid = parseInt(content, 10);
+  } catch { /* unreadable — treat as stale */ }
+  let alive = false;
+  if (Number.isFinite(stalePid) && stalePid > 0) {
+    try {
+      // Signal 0 doesn't deliver a signal — just probes the process.
+      process.kill(stalePid, 0);
+      alive = true;
+    } catch { /* ESRCH or EPERM — treat as not-our-process */ }
+  }
+  if (alive) {
+    throw new Error(
+      `mint lock held by pid ${stalePid}. ` +
+      `Wait for that process to finish, or remove ${lockFile} manually.`,
+    );
+  }
+  // Stale: replace it.
+  await unlink(lockFile).catch(() => {});
+  return await open(lockFile, "wx");
+}
+
 async function appendSignupMint(
   recipientPubkey: string,
   amount: number,
   adminPriv: KeyObject,
 ): Promise<void> {
   const lockFile = join(ASH_DIR, "mint.lock");
-  const lock = await open(lockFile, "wx");
+  const lock = await acquireMintLock(lockFile);
   try {
+    // Stamp our PID into the lock so future stale-detection works.
+    await lock.write(`${process.pid}\n`, 0);
+    await lock.sync().catch(() => {});
     // Re-check inside the lock: another process may have minted concurrently.
     const existing = await getEvents(ADMIN_PUBKEY);
     for (const ev of existing) {

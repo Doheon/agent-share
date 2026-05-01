@@ -162,8 +162,14 @@ export async function fetchPRReviews(
   prNumber: number,
   token?: string,
 ): Promise<GitHubReview[]> {
-  const res = await ghFetch(`/repos/${repo}/pulls/${prNumber}/reviews`, token);
-  return jsonOrThrow<GitHubReview[]>(res, "fetchPRReviews");
+  // Paginated: long-running PRs accumulate >30 reviews and the
+  // "did I already review this PR?" check would otherwise miss prior
+  // reviews past page 1, leading to duplicate review submissions.
+  return paginated<GitHubReview>(
+    `/repos/${repo}/pulls/${prNumber}/reviews`,
+    token,
+    "fetchPRReviews",
+  );
 }
 
 export async function createPR(

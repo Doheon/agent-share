@@ -29,13 +29,18 @@ const FILE_PATTERNS: RegExp[] = [
 
 const CONTENT_PATTERNS: SecretPattern[] = [
   { name: "AWS Access Key", pattern: /AKIA[0-9A-Z]{16}/ },
+  { name: "AWS Temporary Session Token", pattern: /ASIA[0-9A-Z]{16}/ },
   { name: "AWS Secret Key", pattern: /(?:AWS_SECRET|aws_secret)[_\s]*(?:ACCESS_)?KEY[_\s]*[=:]\s*["']?[A-Za-z0-9/+=]{40}/ },
   { name: "GCP API Key", pattern: /AIza[0-9A-Za-z\-_]{35}/ },
-  { name: "GitHub Personal Access Token", pattern: /ghp_[0-9a-zA-Z]{36}/ },
-  { name: "GitHub App Token", pattern: /ghs_[0-9a-zA-Z]{36}/ },
-  { name: "GitHub OAuth Token", pattern: /gho_[0-9a-zA-Z]{36}/ },
+  // GitHub PAT formats (length-flexible to cover both classic ~36 chars
+  // and modern variants up to 255).
+  { name: "GitHub Token (PAT/App/OAuth/User/Refresh)", pattern: /gh[psouar]_[0-9a-zA-Z_]{30,}/ },
+  { name: "GitHub Fine-grained PAT", pattern: /github_pat_[A-Za-z0-9_]{60,}/ },
+  // OpenAI: classic sk-… (48 chars) AND scoped sk-proj-… (variable length).
   { name: "OpenAI API Key", pattern: /sk-[a-zA-Z0-9]{48}/ },
-  { name: "Anthropic API Key", pattern: /sk-ant-[a-zA-Z0-9\-_]{95}/ },
+  { name: "OpenAI Project Key", pattern: /sk-proj-[A-Za-z0-9_-]{40,}/ },
+  // Anthropic: legacy sk-ant-{95}, modern sk-ant-api03-… (length flexible).
+  { name: "Anthropic API Key", pattern: /sk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}/ },
   { name: "Stripe Secret Key", pattern: /sk_live_[0-9a-zA-Z]{24}/ },
   { name: "Stripe Test Key", pattern: /sk_test_[0-9a-zA-Z]{24}/ },
   { name: "Slack Token", pattern: /xox[baprs]-[0-9a-zA-Z\-]{10,48}/ },

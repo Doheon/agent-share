@@ -16,7 +16,7 @@
  */
 
 import { join } from "node:path";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { ASH_DIR } from "./ash_dir.ts";
 import type { KeyObject } from "node:crypto";
 import {
@@ -56,9 +56,28 @@ export function invalidateConfigCache(): void {
 
 export async function loadConfig(forceRefresh = false): Promise<AshConfig> {
   if (_config && !forceRefresh) return _config;
+  let raw: string | null = null;
   try {
-    _config = JSON.parse(await readFile(CONFIG_PATH, "utf-8")) as AshConfig;
+    raw = await readFile(CONFIG_PATH, "utf-8");
   } catch {
+    _config = {};
+    return _config;
+  }
+  try {
+    _config = JSON.parse(raw) as AshConfig;
+  } catch (err) {
+    // The file exists but is not valid JSON — almost always a torn
+    // write after power loss / OOM. Don't silently zero out the
+    // user's pubkey/username mapping: back up the broken file and
+    // log loudly so the user can recover (the identity keys at
+    // ~/.ash/keys/identity.ed25519 survive, so re-running `ash init`
+    // is safe).
+    const bak = `${CONFIG_PATH}.bak.${Date.now()}`;
+    try { await rename(CONFIG_PATH, bak); } catch { /* best effort */ }
+    console.error(
+      `[ash] config at ${CONFIG_PATH} is corrupted (${(err as Error).message}).\n` +
+      `      Backed up to ${bak}. Run \`ash init\` to rebuild.`,
+    );
     _config = {};
   }
   return _config;
@@ -68,7 +87,12 @@ export async function saveConfig(patch: Partial<AshConfig>): Promise<void> {
   await mkdir(ASH_DIR, { recursive: true });
   const current = await loadConfig().catch(() => ({} as AshConfig));
   const merged = { ...current, ...patch };
-  await writeFile(CONFIG_PATH, JSON.stringify(merged, null, 2), { mode: 0o600 });
+  // Atomic write: write to a temp file then rename. A crash mid-write
+  // leaves the previous good config in place rather than truncating
+  // the live file.
+  const tmp = `${CONFIG_PATH}.tmp.${process.pid}`;
+  await writeFile(tmp, JSON.stringify(merged, null, 2), { mode: 0o600 });
+  await rename(tmp, CONFIG_PATH);
   _config = merged;
 }
 

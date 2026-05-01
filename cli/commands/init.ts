@@ -10,8 +10,8 @@
  */
 
 import { Command } from "commander";
-import { input, select, confirm } from "@inquirer/prompts";
-import { stat, mkdir } from "node:fs/promises";
+import { input, password, select, confirm } from "@inquirer/prompts";
+import { chmod, stat, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { ASH_DIR } from "../ash_dir.ts";
 import {
@@ -155,7 +155,10 @@ export async function refreshAgentCredentials(agent: AgentType): Promise<void> {
       stdin: "inherit", stdout: "inherit", stderr: "inherit",
     });
     await proc.exited;
-    const token = (await input({ message: "Paste your token (starts with sk-ant-…)" })).trim();
+    // Use password() so the sk-ant-… token is never echoed to the
+    // terminal — it would otherwise sit in the user's scrollback and
+    // shell history (Ctrl-R recall).
+    const token = (await password({ message: "Paste your token (starts with sk-ant-…)", mask: "*" })).trim();
     if (!token || !token.startsWith("sk-ant-")) {
       console.error("\nerror: Invalid token. Re-run `ash init` after `claude setup-token` succeeds.\n");
       process.exit(2);
@@ -165,7 +168,10 @@ export async function refreshAgentCredentials(agent: AgentType): Promise<void> {
   } else if (agent === "codex") {
     console.log("\n  Creating a dedicated session for container use...\n");
     const codexSessionDir = `${ASH_DIR}/codex-session`;
-    await mkdir(codexSessionDir, { recursive: true });
+    // 0o700: the session dir holds Codex's auth.json which is the
+    // user's OpenAI session. Codex itself doesn't enforce a strict
+    // mode on the file, so we lock down the parent.
+    await mkdir(codexSessionDir, { recursive: true, mode: 0o700 });
     const safeEnv: Record<string, string> = {
       PATH: process.env.PATH ?? "/usr/bin:/bin",
       HOME: codexSessionDir,
@@ -184,6 +190,11 @@ export async function refreshAgentCredentials(agent: AgentType): Promise<void> {
       console.error("\nerror: Session not created.\n");
       process.exit(1);
     }
+    // Codex writes the auth file with whatever umask is active. Tighten
+    // it ourselves so the OpenAI session token is readable only by the
+    // owner.
+    try { await chmod(`${codexSessionDir}/.codex/auth.json`, 0o600); } catch { /* best effort */ }
+    try { await chmod(`${codexSessionDir}/.codex`, 0o700); } catch { /* best effort */ }
     console.log("  Session created.");
   }
 }
@@ -337,12 +348,30 @@ async function runInit(): Promise<void> {
       // to verify their setup, and silently leaving an expired token
       // in place would defeat the purpose. Surface the recovery
       // command instead of clobbering anything automatically.
+      //
+      // Caveat: `validateAgentCredentials` returns `true` on network
+      // failure to avoid blocking serve startup on transient errors.
+      // For init's explicit validation pass that's a false positive,
+      // so we explicitly probe network reachability first and qualify
+      // the success message accordingly.
+      let networkUp = true;
+      try {
+        const probe = new AbortController();
+        const t = setTimeout(() => probe.abort(), 3000);
+        await fetch("https://api.anthropic.com/", { method: "HEAD", signal: probe.signal })
+          .catch(() => { networkUp = false; });
+        clearTimeout(t);
+      } catch {
+        networkUp = false;
+      }
       const ok = await validateAgentCredentials(config.agent).catch(() => false);
       if (!ok) {
         console.log(
           `  ⚠  ${info.name} credentials are missing or expired.\n` +
           `     Refresh with:  ash login ${config.agent}\n`,
         );
+      } else if (!networkUp) {
+        console.log(`  • credentials present (could not verify — network unreachable).\n`);
       } else {
         console.log(`  ✓ credentials look valid.\n`);
       }

@@ -10,7 +10,7 @@ import { loadConfig, loadIdentity } from "../client.ts";
 import { getLedgerCoreKey, getRemotePeerBalance, closeLocalStore } from "../p2p_state.ts";
 import { AshSwarm } from "../../core/p2p/swarm.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
-import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
+import { registerPeerLedgerKey, forgetPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
 import { LEDGER_TOPIC } from "../../shared/constants.ts";
 import type { P2PMessage } from "../../core/p2p/messages.ts";
 
@@ -18,7 +18,18 @@ const DISCOVER_MS = 8000;
 
 export const peersCommand = new Command("peers")
   .description("Discover active peers and show their balances")
-  .action(async () => {
+  .option("--forget <pubkey>", "Drop a stale ledger-key mapping (for peers who reset their corestore)")
+  .action(async (opts: { forget?: string }) => {
+    if (typeof opts.forget === "string" && opts.forget.length > 0) {
+      const target = opts.forget.trim().toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(target)) {
+        console.error("\nerror: --forget expects a 64-char hex pubkey.\n");
+        process.exit(2);
+      }
+      await forgetPeerLedgerKey(target);
+      console.log(`\n  forgot cached ledger key for ${target.slice(0, 16)}…\n`);
+      return;
+    }
     const cfg = await loadConfig();
     if (!cfg.pubkey) {
       console.error("\nerror: not initialized. Run: ash init\n");

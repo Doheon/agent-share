@@ -48,10 +48,12 @@ if (result.error) {
 }
 
 // Preserve signal-based termination so shells / CI see the right exit
-// code (130 for SIGINT, etc.) instead of a generic 1.
+// code (130 for SIGINT, etc.) instead of a generic 1. On POSIX,
+// process.kill delivers the signal synchronously and we never reach
+// process.exit. On Windows, process.kill throws ERR_UNKNOWN_SIGNAL —
+// catch it so we don't print a noisy stack trace before exiting.
 if (result.signal) {
-  process.kill(process.pid, result.signal);
-  // Fallback if the signal couldn't be delivered (e.g. on Windows).
+  try { process.kill(process.pid, result.signal); } catch { /* Windows fallback */ }
   process.exit(1);
 }
 

@@ -104,10 +104,14 @@ export async function runAgentInSandbox(opts: SandboxOptions): Promise<RunResult
   const args: string[] = [
     "run", "--rm",
     `--network=${networkMode(runtime, allowedHosts.length > 0)}`,
-    `--volume=${taskDir}:/workspace:z`,
+    // `:Z` (uppercase) gives a private SELinux label per container —
+    // lowercase `:z` would relabel the host file as shared-content,
+    // which on multi-tenant SELinux hosts lets a sibling container
+    // read+write the same files. Always use the private label.
+    `--volume=${taskDir}:/workspace:Z`,
     // Mount taskDir read-only at /task so the agent command can read prompt.txt
     // and the agent-token secret without being able to write outside /workspace.
-    `--volume=${taskDir}:/task:ro`,
+    `--volume=${taskDir}:/task:ro,Z`,
     "--tmpfs", "/tmp:rw,noexec,nosuid,size=100m",
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",

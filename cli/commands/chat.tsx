@@ -462,6 +462,13 @@ function ChatApp({
       addMsg("  ⎿ a task is already in flight; wait for it to finish.", "#e3bd5a");
       return;
     }
+    // Wrap the entire flow in try/finally so any uncaught throw between
+    // setting `pendingRef.current` and the inner Promise's `finish()`
+    // still clears the lock. Without this guard, a thrown error from
+    // (e.g.) `getLedgerCoreKey` or `swarm.broadcast` left `pendingRef`
+    // populated forever, blocking every subsequent task in this
+    // session with "a task is already in flight."
+    try {
     addMsg(`❯ ${prompt}`, "#eaeaea");
     const cost = creditsFor(currentModelRef.current);
     const fullPrompt = buildPromptWithHistory(prompt);
@@ -609,7 +616,11 @@ function ChatApp({
           const insertions = (patch.match(/^\+[^+]/gm) ?? []).length;
           const deletions  = (patch.match(/^-[^-]/gm) ?? []).length;
           addMsg(`  ⎿ ${files.length} file${files.length === 1 ? "" : "s"} changed  +${insertions} / -${deletions}`, "#7cd38a");
-          for (const f of files) addMsg(`  ⎿ • ${f}`, "#6b6b6b");
+          // Sanitize each filename before display: a hostile acceptor
+          // could craft a patch with ANSI escapes in the file path
+          // (terminal-title spoof, OSC 52 clipboard write, etc.).
+          // The wire-side `sanitizeLogLine` strips C0 / CSI / OSC.
+          for (const f of files) addMsg(`  ⎿ • ${sanitizeLogLine(f)}`, "#6b6b6b");
           addMsg(`  ⎿ Apply? (y=${fullCost}cr · n=${halfCost}cr · 60s no reply = ${halfCost}cr)`, "#ffcc44");
 
           const decision = await new Promise<"y" | "n" | "timeout">((resolve) => {
@@ -731,6 +742,15 @@ function ChatApp({
         finish();
       };
     });
+    } finally {
+      // Defensive cleanup: anything between `pendingRef.current = {...}`
+      // and the inner Promise's `finish()` that throws would otherwise
+      // leave the lock set forever. The Promise body itself sets
+      // `pendingRef.current = null` inside `finish()`, so under the
+      // happy path this is a no-op.
+      pendingRef.current = null;
+      setInflightStatus(null);
+    }
   }, [addMsg, updateLastMsg, swarm, userId, edPriv, absDir, models]);
 
   const enterServeMode = useCallback(async (nArg: number | undefined) => {
@@ -1433,4 +1453,8 @@ export async function runChat(opts: { model?: string } = {}): Promise<void> {
 
   await waitUntilExit();
   await repSwarm?.destroy().catch(() => {});
+  // Release the corestore handle on exit. Without this the file lock
+  // can linger long enough that a second `ash` invocation in the next
+  // shell sees "Corestore locked".
+  await closeLocalStore().catch(() => undefined);
 }

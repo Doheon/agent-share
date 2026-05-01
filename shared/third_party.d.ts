@@ -19,3 +19,10 @@ declare module "hyperswarm" {
   export = Hyperswarm;
 }
 
+// `corestore` ships no .d.ts. We use it via dynamic import + the
+// `// @typescript-eslint/no-explicit-any` escape hatch in
+// core/ledger/store.ts; this shim just suppresses TS7016 so the
+// type-check baseline stays clean.
+declare module "corestore";
+declare module "hypercore";
+
