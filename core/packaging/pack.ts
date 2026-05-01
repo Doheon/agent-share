@@ -133,7 +133,7 @@ export class PackageTooLargeError extends Error {
   }
 }
 
-export async function packDirectory(dir: string): Promise<PackResult> {
+export async function packDirectory(dir: string, aad?: Uint8Array): Promise<PackResult> {
   const { tar, largest } = await directoryToTar(dir);
 
   if (tar.length > MAX_BLOB_SIZE) {
@@ -144,7 +144,7 @@ export async function packDirectory(dir: string): Promise<PackResult> {
     );
   }
 
-  const { ciphertext, key, iv } = await encryptData(tar);
+  const { ciphertext, key, iv } = await encryptData(tar, aad);
   const aesKeyRaw = await exportKey(key);
 
   return { ciphertext, iv, aesKeyRaw };

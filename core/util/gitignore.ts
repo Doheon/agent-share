@@ -1,6 +1,23 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+/**
+ * Loads `.gitignore` patterns and converts them to RegExp matchers.
+ *
+ * Limitations vs full gitignore semantics (documented):
+ *   - `!negation` lines are SKIPPED rather than implemented as un-ignore.
+ *     A previous version converted `!build` into a literal `\!build`
+ *     pattern that effectively re-included the file under a wrong name.
+ *     Skipping is the safer default for a v0.1 packing path — falsely
+ *     ignoring is worse than falsely shipping (the latter is caught by
+ *     `secret_scanner.ts` and `ALWAYS_IGNORE`).
+ *   - `**` is approximated by `.*`, no path-segment-anchored matching.
+ *   - Trailing-slash directory-only matching is not enforced.
+ *
+ * For projects with non-trivial ignore rules, callers should treat the
+ * pack contents as best-effort and rely on `secret_scanner` to catch the
+ * dangerous outliers (.env, credentials, etc.).
+ */
 export async function loadGitignorePatterns(dir: string): Promise<RegExp[]> {
   try {
     const content = await readFile(join(dir, ".gitignore"), "utf-8");
@@ -8,8 +25,15 @@ export async function loadGitignorePatterns(dir: string): Promise<RegExp[]> {
       .split("\n")
       .map((l) => l.trim())
       .filter((l) => l && !l.startsWith("#"))
+      // Skip negation lines — see limitation above. Without this, a
+      // line like `!keep.txt` was being turned into a literal pattern
+      // that ignored every path containing `!keep.txt`.
+      .filter((l) => !l.startsWith("!"))
       .map((pattern) => {
-        const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+        const escaped = pattern
+          .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+          .replace(/\*/g, ".*")
+          .replace(/\?/g, ".");
         return new RegExp(`(^|/)${escaped}(/|$)`);
       });
   } catch {

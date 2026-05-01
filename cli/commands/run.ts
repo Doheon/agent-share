@@ -22,6 +22,7 @@ import {
 } from "../../core/crypto/rsa.ts";
 import { scanDirectory, formatScanResults } from "../../core/packaging/secret_scanner.ts";
 import { packDirectory } from "../../core/packaging/pack.ts";
+import { buildTaskAad } from "../../core/crypto/aes.ts";
 import { applyPatch, getChangedFiles } from "../../core/diff/apply.ts";
 import { signEd25519 } from "../../core/crypto/ed25519.ts";
 import { canonicalStringify } from "../../shared/canonical.ts";
@@ -36,6 +37,9 @@ import {
   getLocalBalance,
   getNextNonce,
   getLedgerCoreKey,
+  reservePendingSpend,
+  releasePendingSpend,
+  getSpendableBalance,
 } from "../p2p_state.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
 import { LEDGER_TOPIC } from "../../shared/constants.ts";
@@ -73,6 +77,24 @@ export const runCommand = new Command("run")
     if (!models.find((m) => m.tier === modelTier)) modelTier = DEFAULT_MODEL_TIER;
     const cost = models.find((m) => m.tier === modelTier)?.credits ?? 15;
 
+    // Pre-flight balance check using the spendable view (replayed minus
+    // any in-flight reservations from concurrent flows in this process).
+    // Without this, two concurrent `ash run` invocations could each see
+    // the full balance and over-spend.
+    const spendable = await getSpendableBalance(userId);
+    if (spendable < cost) {
+      console.error(`\n  Insufficient credits: need ${cost}, have ${spendable} spendable.\n`);
+      await closeLocalStore().catch(() => undefined);
+      process.exit(1);
+    }
+    reservePendingSpend(userId, cost);
+    let reservationLive = true;
+    const releaseReservation = () => {
+      if (!reservationLive) return;
+      reservationLive = false;
+      releasePendingSpend(userId, cost);
+    };
+
     const swarm = new AshSwarm();
     try {
       await swarm.join(edPriv, userId);
@@ -100,6 +122,7 @@ export const runCommand = new Command("run")
     }
 
     const cleanup = async (code = 0) => {
+      releaseReservation();
       await repSwarm?.destroy().catch(() => {});
       await swarm.destroy().catch(() => undefined);
       await closeLocalStore().catch(() => undefined);
@@ -135,13 +158,19 @@ export const runCommand = new Command("run")
       return;
     }
 
+    // Generate task identity *before* packing so the AES-GCM AAD binds the
+    // ciphertext to (taskId, requesterPubkey). Any swap of ciphertexts
+    // between concurrent tasks will fail authenticated decryption.
+    const taskId = randomUUID();
+    const aad = buildTaskAad(taskId, userId);
+
     // Pack.
     let ciphertextB64: string;
     let ivB64: string;
     let aesKeyRaw: Uint8Array;
     let blobSize: number;
     try {
-      const { ciphertext, iv, aesKeyRaw: keyRaw } = await packDirectory(absDir);
+      const { ciphertext, iv, aesKeyRaw: keyRaw } = await packDirectory(absDir, aad);
       aesKeyRaw = keyRaw;
       ciphertextB64 = Buffer.from(ciphertext).toString("base64");
       ivB64 = Buffer.from(iv).toString("base64");
@@ -156,7 +185,6 @@ export const runCommand = new Command("run")
 
     const myRsa = await getOrCreateKeyPair(userId);
     const myRsaPubPem = await exportPublicKeyPem(myRsa.publicKey);
-    const taskId = randomUUID();
 
     let acceptorPeer: SwarmPeer | null = null;
     let acceptorPubkey: string | null = null;
@@ -247,8 +275,15 @@ export const runCommand = new Command("run")
 
       // Wait for acceptor's task:settle decision.
       const settleAction = await new Promise<"approve" | "reject">((resolve) => {
-        resolveSettle = resolve;
-        setTimeout(() => resolve("reject"), 30_000);
+        let done = false;
+        const settle = (v: "approve" | "reject") => {
+          if (done) return;
+          done = true;
+          clearTimeout(t);
+          resolve(v);
+        };
+        resolveSettle = settle;
+        const t = setTimeout(() => settle("reject"), 30_000);
       });
       resolveSettle = null;
 

@@ -18,6 +18,7 @@ import { ensureInitialized, NotInitializedError } from "./guard.ts";
 import { getLocalBalance, closeLocalStore } from "./p2p_state.ts";
 import { CLIENT_VERSION } from "../shared/protocol.ts";
 import { getAgentStatus, type AgentStatus } from "./commands/init.ts";
+import { modelToAgent } from "../shared/types.ts";
 
 function exitNotInitialized(err: NotInitializedError): never {
   console.error(`\nerror: ${err.reason}\n  → ${err.hint}\n`);
@@ -66,19 +67,20 @@ program.addCommand(
         }
         const balance = await getLocalBalance(cfg.pubkey);
         const modelTier = await loadModelTier();
-        const [claudeStatus, codexStatus] = await Promise.all([
-          getAgentStatus("claude"),
-          getAgentStatus("codex"),
-        ]);
+        // Probe only the agent the user actually configured. Probing both
+        // unconditionally sent stale tokens to whichever provider the
+        // user hadn't logged into.
+        const configuredAgent = cfg.agent ?? modelToAgent(modelTier);
+        const probedStatus = await getAgentStatus(configuredAgent);
         const statusLabel = (s: AgentStatus) =>
           s === "valid"          ? "✓ ready" :
           s === "expired"        ? "✗ token expired   (run: ash login)" :
                                    "— not configured  (run: ash login)";
+        const agentLabel = configuredAgent === "codex" ? "codex" : "claude code";
         console.log(
           `\n  ${cfg.username}  ·  ${balance.balance} credits  ·  ${modelTier}\n` +
           `  pubkey: ${cfg.pubkey}\n\n` +
-          `  claude code:  ${statusLabel(claudeStatus)}\n` +
-          `  codex:        ${statusLabel(codexStatus)}\n`,
+          `  agent (${agentLabel}):  ${statusLabel(probedStatus)}\n`,
         );
       } catch (err) {
         console.error(`\nerror: ${(err as Error).message}\n`);

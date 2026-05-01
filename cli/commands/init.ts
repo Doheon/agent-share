@@ -316,7 +316,40 @@ async function runInit(): Promise<void> {
     );
   }
 
-  await selectAndSaveAgent();
+  // If an agent is already configured, don't silently overwrite it. Show
+  // the current selection and only re-prompt when the user opts in. This
+  // prevents repeat `ash init` runs from clobbering the saved agent.
+  if (config.agent) {
+    const info = AGENT_INFO[config.agent];
+    console.log(`  agent: ${info.name}  (already configured)`);
+    let change = false;
+    if (process.stdin.isTTY) {
+      change = await confirm({
+        message: "Change the configured agent?",
+        default: false,
+      });
+    }
+    if (change) {
+      await selectAndSaveAgent();
+    } else {
+      // Even when the user keeps the existing agent, validate that its
+      // credentials still work — the user invoked `ash init` precisely
+      // to verify their setup, and silently leaving an expired token
+      // in place would defeat the purpose. Surface the recovery
+      // command instead of clobbering anything automatically.
+      const ok = await validateAgentCredentials(config.agent).catch(() => false);
+      if (!ok) {
+        console.log(
+          `  ⚠  ${info.name} credentials are missing or expired.\n` +
+          `     Refresh with:  ash login ${config.agent}\n`,
+        );
+      } else {
+        console.log(`  ✓ credentials look valid.\n`);
+      }
+    }
+  } else {
+    await selectAndSaveAgent();
+  }
 
   console.log("\n  Setting up environment...\n");
   await runSetup(false);

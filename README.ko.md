@@ -40,10 +40,25 @@ ash는 서버가 아닌 순수 피어투피어 네트워크입니다. 작업을 
 
 - **종단간 암호화**: 코드와 diff는 AES-256-GCM으로 암호화. 피어들은 RSA-OAEP로 키 교환. 서버는 평문을 볼 수 없음.
 - **서명된 append-only 로그**: 각 피어는 `~/.ash/corestore/`에 로컬 Ed25519 서명 Hypercore를 유지. 로그는 잔액 검증을 위해 P2P로 복제됨.
-- **샌드박스 실행**: 수락자들은 rootless Podman 컨테이너 (`--cap-drop=ALL`, `--read-only`)에서 AI 에이전트 실행.
+- **샌드박스 실행**: 수락자들은 rootless Podman/Docker 컨테이너에서 `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `/tmp`은 `tmpfs noexec,nosuid`, non-root 유저로 AI 에이전트 실행.
 - **원자적 클레임**: 한 피어만 작업을 수락 가능. 정산은 원자적 — 수락자가 작업을 완료하면 크레딧 발급.
 
 > **보안 주의**: 수락자는 샌드박스 내에서 코드를 평문으로 읽을 수 있습니다. 회사 코드나 NDA가 적용되는 코드는 제출하지 마세요.
+
+---
+
+## ⚠️ v0.1 — 실험판
+
+ash는 1.0 이전 버전입니다. 프로토콜, 원장 포맷, 키 디렉터리 구조는 minor 버전 사이에서도 바뀔 수 있습니다. **민감한 비밀이 있는 머신에서 돌리지 말고, `ash serve`는 일회용 머신에서 사용하며, 크레딧이 중요하다면 `~/.ash/`를 백업하세요.**
+
+미리 알아둘 사항:
+
+- **크레딧은 admin이 발급합니다.** 모든 크레딧은 `admin`이 서명한 `MintEvent`에서 시작합니다. admin 키페어를 분실하거나 유출되면 신규 발급이 멈춥니다 — v0.1에는 분산 대안이 없습니다.
+- **콜드 스타트 시 DHT 부트스트랩이 느립니다.** 첫 피어 연결까지 30~90초 걸릴 수 있고, 원격 코어가 아직 복제되지 않아 잔액 검증이 실패할 수도 있습니다. 명령을 다시 실행하면 됩니다.
+- **`ash serve`는 샌드박스에서 실행되지만, `ash mine`은 아닙니다.** mine 워크플로는 공개 ash 레포 클론에서 동작하므로 호스트 머신에서 직접 AI 에이전트를 실행합니다 (Podman/Docker 사용 안 함). 민감한 정보가 있는 머신에서 `ash mine`을 돌리지 마세요.
+- **네트워크 노출.** 수락자는 에이전트가 `api.anthropic.com` / OpenAI에 접근할 수 있도록 외부 HTTPS를 허용합니다. Docker에서는 샌드박스 컨테이너가 `--network=bridge`로 동작합니다 (`podman`은 `slirp4netns`). 클라우드 메타데이터 호스트명(`169.254.169.254`, `host.docker.internal` 등)은 loopback으로 매핑하지만, 비특권 컨테이너 안에서 브리지 자체를 완전히 방화벽 처리할 수는 없습니다. 민감한 LAN 이웃이 있는 머신이나 광범위한 IAM이 부여된 클라우드 인스턴스에서 `ash serve`를 돌리지 마세요.
+- **네이티브 의존성.** `hypercore`/`hyperswarm`은 `sodium-native`/`udx-native`를 필요로 합니다. prebuilt 바이너리가 없는 플랫폼(Alpine, 일부 ARM Linux)에서는 C 빌드 툴체인이 필요합니다. 빌드 실패 시 `npm install` 출력에 표시됩니다.
+- **신원 파일은 로컬에만.** `~/.ash/keys/identity.ed25519` (원장 서명)와 `~/.ash/keys/rsa/` (작업당 AES 키 교환)이 디스크에 저장됩니다. 이전 버전은 RSA 키를 `~/.agent-share/keys/`에 두었지만, 업그레이드 후 첫 실행 시 자동으로 마이그레이션됩니다.
 
 ---
 
@@ -280,7 +295,7 @@ ash admin watch-signups --bonus 50   # 오버라이드
 
 ### 신원 및 로그
 
-- **키페어**: Ed25519 at `~/.ash/keys/ed25519`
+- **키페어**: Ed25519 at `~/.ash/keys/identity.ed25519`
 - **이벤트 로그**: 유저별 Hypercore at `~/.ash/corestore/` (append-only, Ed25519 서명, Hyperswarm으로 P2P 복제)
 - **설정**: 사용자명과 모델 티어 at `~/.ash/config.json`
 
@@ -298,10 +313,13 @@ ash admin watch-signups --bonus 50   # 오버라이드
 
 ### 샌드박스
 
-수락자들은 AI 에이전트를 rootless Podman 컨테이너에서 실행합니다:
+수락자들은 AI 에이전트를 rootless Podman 또는 Docker 컨테이너에서 실행합니다:
 - `--cap-drop=ALL` (권한 없음)
-- `--read-only` (불변 루트 파일시스템)
-- `--tmpfs /tmp` (쓰기 가능한 tmpdir만)
+- `--security-opt=no-new-privileges`
+- `--tmpfs /tmp:rw,noexec,nosuid,size=100m`
+- 컨테이너 내부에서 non-root `sandboxuser`
+- 에이전트 토큰은 read-only로 `/run/secrets/agent-token`에 마운트
+- 클라우드 메타데이터 DNS 이름을 `127.0.0.1`로 매핑하는 `--add-host` 엔트리
 
 ---
 
@@ -327,6 +345,20 @@ ash admin watch-signups --bonus 50   # 오버라이드
 ### 에이전트 로그인 만료
 
 `ash login` 또는 TUI 안에서 `/login`으로 갱신.
+
+### 핸드셰이크 디버그 로그
+
+피어가 연결되지 않거나 조용히 끊긴다면 디버그 로그를 켜서 실행:
+
+```bash
+ASH_DEBUG_SWARM=1 ash
+```
+
+핸드셰이크 타임아웃, 서명 실패, 프로토콜 버전 불일치가 stderr에 출력됩니다.
+
+### 와이어 프로토콜 비호환
+
+모든 피어는 `peer:hello`에 `protocol_version`을 실어 보냅니다. 버전이 정확히 일치하지 않으면 거부됩니다 — 호환 구간 없음. v0.1.0은 protocol version 2를 사용하며, 그 이전 내부 빌드와는 함께 사용할 수 없습니다.
 
 ### Podman 오류
 

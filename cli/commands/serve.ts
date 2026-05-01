@@ -20,6 +20,7 @@ import {
 } from "../../core/crypto/keypair.ts";
 import { decryptAesKey, exportPublicKeyPem } from "../../core/crypto/rsa.ts";
 import { unpackToDirectory } from "../../core/packaging/unpack.ts";
+import { buildTaskAad } from "../../core/crypto/aes.ts";
 import { runAgentInSandbox, CODEX_LAST_MESSAGE_FILE } from "../../core/sandbox/runner.ts";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -108,6 +109,16 @@ export async function processTask(
   const agent = modelToAgent(modelTier);
   let earned = 0;
 
+  // Re-validate agent credentials at the start of every task. Tokens can
+  // expire mid-session; without this check the acceptor would burn the
+  // full sandbox timeout (25min default) before failing with an auth
+  // error. Reject the requester cleanly so they can pick another peer.
+  if (!(await validateAgentCredentials(agent))) {
+    logger(`  ${YL}⚠${R}  ${agent} credentials expired — rejecting task\n`);
+    active.peer.send({ type: "task:settle", task_id: active.taskId, action: "reject" });
+    throw new AuthError(`${agent} credentials are no longer valid`);
+  }
+
   // Promises that resolve immediately if the message already arrived before processTask started.
   const matchPromise = new Promise<void>((r) => {
     if (active.encryptedAesKeyB64 && active.blobIvB64) r();
@@ -137,7 +148,11 @@ export async function processTask(
   const aesKeyRaw = await decryptAesKey(active.encryptedAesKeyB64, rsaPriv);
 
   const workDir = await ensureTaskDir(active.taskId);
-  await unpackToDirectory(ciphertext, aesKeyRaw, iv, workDir);
+  // Bind AAD to (taskId, requesterPubkey) — matches the requester's pack.
+  // Any ciphertext substitution from another concurrent task will fail
+  // authenticated decryption here.
+  const aad = buildTaskAad(active.taskId, active.requesterPubkey);
+  await unpackToDirectory(ciphertext, aesKeyRaw, iv, workDir, aad);
   await initRepo(workDir);
 
   // Run the AI agent in the sandbox. For codex we keep stdout on the acceptor
@@ -188,8 +203,15 @@ export async function processTask(
 
   // Wait for the requester's spend:cosign, then validate and drive the settle.
   const spendPromise = new Promise<import("../../shared/events.ts").SpendEvent | null>((resolve) => {
-    active.resolveSpend = (evt) => resolve(evt);
-    setTimeout(() => resolve(null), 120_000);
+    let done = false;
+    const settle = (evt: import("../../shared/events.ts").SpendEvent | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(t);
+      resolve(evt);
+    };
+    active.resolveSpend = settle;
+    const t = setTimeout(() => settle(null), 120_000);
   });
   const spend = await spendPromise;
 
@@ -230,14 +252,21 @@ export async function processTask(
   logger(`  ${D}settle: approve${R}\n`);
 
   const earnPromise = new Promise<import("../../shared/events.ts").EarnEvent | null>((resolve) => {
-    active.resolveEarn = (evt) => resolve(evt);
-    setTimeout(() => resolve(null), 30_000);
+    let done = false;
+    const settle = (evt: import("../../shared/events.ts").EarnEvent | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(t);
+      resolve(evt);
+    };
+    active.resolveEarn = settle;
+    const t = setTimeout(() => settle(null), 30_000);
   });
 
   const earn = await earnPromise;
+  const expectedEarn = splitFee(spend!.amount).acceptor;
   if (earn) {
     try {
-      const expectedEarn = splitFee(spend!.amount).acceptor;
       const earnOk =
         earn.task_id === active.taskId &&
         earn.amount === expectedEarn &&
@@ -258,7 +287,16 @@ export async function processTask(
       logger(`  ${YL}⚠${R}  failed to append earn: ${(err as Error).message}\n`);
     }
   } else {
-    logger(`  ${YL}⚠${R}  no earn cosign received within 30s\n`);
+    // earn-cosign DoS — requester sent settle=approve, signed and
+    // forwarded a valid SpendEvent, then dropped before sending the
+    // matching `earn:cosign`. We have no way to materialize a valid
+    // EarnEvent here: replay validates `earn.signature` against the
+    // counterparty (requester) pubkey, which we cannot impersonate.
+    // Self-signing with our own key produces an event that fails
+    // replay forever — silent credit loss. Better to surface the loss
+    // and warn the user. v0.2 will add a `self_signed_via_spend_xref`
+    // schema flag so the cross-ref alone can authorize the earn.
+    logger(`  ${YL}⚠${R}  no earn cosign in 30s — credit not awarded (requester dropped after approve)\n`);
   }
 
   await cleanupTask(active.taskId);
@@ -373,7 +411,14 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
     // cross-ref this peer's log (bug fix: earn events were silently dropped
     // because `getUserCore(pubkey)` returned an empty local stub).
     if (msg.type === "peer:info") {
-      registerPeerLedgerKey(msg.pubkey, msg.ledger_core_key).catch(() => undefined);
+      // Only trust the ledger key when peer:info matches the
+      // handshake-verified identity. Otherwise a malicious peer could
+      // poison our cache with a fake mapping for someone else's pubkey
+      // (peer_keys.ts is first-write-wins, so the bad entry would
+      // shadow the legitimate one indefinitely).
+      if (msg.pubkey === peer.pubkey) {
+        registerPeerLedgerKey(msg.pubkey, msg.ledger_core_key).catch(() => undefined);
+      }
       return;
     }
     if (active && active.peer.id === peer.id) {

@@ -22,7 +22,39 @@ export interface ApplyResult {
   conflicts?: string[];
 }
 
+/**
+ * Reject patches that touch paths that should never be modified by a
+ * remote acceptor's diff: `.git/` (could install hooks/config), absolute
+ * paths (escape the repo), and parent traversals.
+ *
+ * `git apply` itself blocks these paths since 2.39 with `apply.useBuiltin`,
+ * but pinning the user's git version is out of our control. Reject at
+ * the wire boundary before invoking git.
+ */
+function unsafePathsIn(patch: string): string[] {
+  const bad: string[] = [];
+  for (const f of getChangedFiles(patch)) {
+    if (
+      f.startsWith(".git/") ||
+      f.startsWith("/") ||
+      f.includes("..") ||
+      f.includes(".git/")
+    ) {
+      bad.push(f);
+    }
+  }
+  return bad;
+}
+
 export async function checkPatch(patch: string, targetDir: string): Promise<ApplyResult> {
+  const unsafe = unsafePathsIn(patch);
+  if (unsafe.length > 0) {
+    return {
+      success: false,
+      error: `patch rejected: unsafe paths\n  ${unsafe.join("\n  ")}`,
+      conflicts: unsafe,
+    };
+  }
   const { success, stderr } = await runGit(
     ["apply", "--check", "--whitespace=nowarn", "-"],
     targetDir,
@@ -39,6 +71,14 @@ export async function checkPatch(patch: string, targetDir: string): Promise<Appl
 }
 
 export async function applyPatch(patch: string, targetDir: string): Promise<ApplyResult> {
+  const unsafe = unsafePathsIn(patch);
+  if (unsafe.length > 0) {
+    return {
+      success: false,
+      error: `patch rejected: unsafe paths\n  ${unsafe.join("\n  ")}`,
+      conflicts: unsafe,
+    };
+  }
   const checkResult = await checkPatch(patch, targetDir);
   if (!checkResult.success) return checkResult;
 

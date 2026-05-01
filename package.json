@@ -21,17 +21,19 @@
     "cli",
     "core",
     "shared",
-    "register.mjs",
-    "loader.mjs",
     "tsconfig.json",
     "README.md",
-    "LICENSE"
+    "README.ko.md",
+    "LICENSE",
+    "!**/*_test.ts",
+    "!**/*.test.ts",
+    "!**/__tests__/**"
   ],
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "dev": "node --import ./register.mjs --import tsx/esm cli/main.ts",
+    "dev": "node --import tsx/esm cli/main.ts",
     "build": "npm pack",
     "test": "vitest"
   },
@@ -43,6 +45,7 @@
     "hyperswarm": "^4.17.0",
     "ink": "^7.0.1",
     "react": "^19",
+    "string-width": "^8",
     "tsx": "^4.21.0"
   },
   "devDependencies": {

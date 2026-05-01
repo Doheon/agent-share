@@ -91,12 +91,36 @@ export async function fetchCurrentUser(token: string): Promise<GitHubUser> {
 // Issues
 // ---------------------------------------------------------------------------
 
+// Bounded pagination — five pages × 100 = 500 entries is enough headroom
+// for the ash repo well past v0.1 without risking unbounded fetch on a
+// runaway response.
+const MAX_PAGES = 5;
+
+async function paginated<T>(
+  basePath: string,
+  token: string | undefined,
+  context: string,
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const sep = basePath.includes("?") ? "&" : "?";
+    const res = await ghFetch(`${basePath}${sep}per_page=100&page=${page}`, token);
+    const batch = await jsonOrThrow<T[]>(res, context);
+    out.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return out;
+}
+
 export async function fetchOpenIssues(
   repo = ASH_REPO,
   token?: string,
 ): Promise<GitHubIssue[]> {
-  const res = await ghFetch(`/repos/${repo}/issues?state=open&per_page=50&direction=asc`, token);
-  const all = await jsonOrThrow<(GitHubIssue & { pull_request?: unknown })[]>(res, "fetchOpenIssues");
+  const all = await paginated<GitHubIssue & { pull_request?: unknown }>(
+    `/repos/${repo}/issues?state=open&direction=asc`,
+    token,
+    "fetchOpenIssues",
+  );
   // GitHub's issues endpoint also returns PRs; filter those out.
   return all.filter((i) => !i.pull_request);
 }
@@ -109,8 +133,7 @@ export async function fetchOpenPRs(
   repo = ASH_REPO,
   token?: string,
 ): Promise<GitHubPR[]> {
-  const res = await ghFetch(`/repos/${repo}/pulls?state=open&per_page=100`, token);
-  return jsonOrThrow<GitHubPR[]>(res, "fetchOpenPRs");
+  return paginated<GitHubPR>(`/repos/${repo}/pulls?state=open`, token, "fetchOpenPRs");
 }
 
 export async function fetchPR(

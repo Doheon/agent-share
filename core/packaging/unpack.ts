@@ -59,9 +59,10 @@ export async function unpackToDirectory(
   aesKeyRaw: Uint8Array,
   iv: Uint8Array,
   destDir: string,
+  aad?: Uint8Array,
 ): Promise<void> {
   const key = await importKey(aesKeyRaw);
-  const tar = await decryptData(ciphertext, key, iv);
+  const tar = await decryptData(ciphertext, key, iv, aad);
 
   if (tar.length > MAX_EXTRACT_SIZE) {
     throw new Error(

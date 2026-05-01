@@ -17,6 +17,7 @@ import { rmSync } from "node:fs";
 import type { KeyObject } from "node:crypto";
 import type { P2PMessage } from "./messages.ts";
 import { isValidMessage } from "./messages.ts";
+import { PROTOCOL_VERSION } from "../../shared/protocol.ts";
 import {
   signEd25519,
   verifyEd25519,
@@ -28,6 +29,15 @@ import {
 const TOPIC = createHash("sha256").update("ash-network-v1").digest();
 const MAX_BUF = 10 * 1024 * 1024; // 10 MB — guard against unbounded memory growth
 const HANDSHAKE_TIMEOUT_MS = 10_000;
+
+// Verbose handshake/disconnect chatter is opt-in via ASH_DEBUG_SWARM=1.
+// Production users were getting stderr spam on every transient peer drop;
+// the messages stay valuable for development but should not pollute
+// normal CLI output.
+const DEBUG = process.env.ASH_DEBUG_SWARM === "1";
+function debugLog(...args: unknown[]): void {
+  if (DEBUG) console.debug(...args);
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Conn = any;
@@ -78,9 +88,31 @@ export class AshSwarm {
   private handleConnection(conn: Conn): void {
     const id: string = conn.remotePublicKey.toString("hex");
 
+    // Channel binding: include the local + remote Noise transport keys in
+    // the signed payload. A relay/MITM that proxies two Noise sessions
+    // would have different remote keys on each side, so a signature valid
+    // for one side does not validate on the other. Without this binding,
+    // a compromised relay holding two sessions could forward V's
+    // challenge to A and A's hello back to V — defeating the handshake's
+    // identity attestation.
+    //
+    // `@hyperswarm/secret-stream` exposes both `publicKey` and
+    // `remotePublicKey` once the Noise handshake completes, which is
+    // before our `connection` event fires. If for some reason the local
+    // key is missing we refuse the connection rather than silently
+    // degrading the binding to nonce-only.
+    if (!conn.publicKey) {
+      console.error(`[swarm] missing local transport key on connection — closing`);
+      try { conn.destroy(); } catch { /* ignore */ }
+      return;
+    }
+    const localTransportHex = (conn.publicKey as Buffer).toString("hex");
+    const remoteTransportHex = id;
+
     // Generate a fresh challenge and send it immediately.
     const myNonceBytes = randomBytes(32);
     const myNonceHex = bytesToHex(myNonceBytes);
+    const challengePayload = `${myNonceHex}|${localTransportHex}|${remoteTransportHex}`;
     try {
       conn.write(JSON.stringify({ type: "peer:challenge", nonce: myNonceHex }) + "\n");
     } catch {
@@ -96,7 +128,7 @@ export class AshSwarm {
     // Destroy the connection if the handshake doesn't complete in time.
     const handshakeTimer = setTimeout(() => {
       if (!handshakeDone) {
-        console.debug(`[swarm] handshake timeout for ${id.slice(0, 16)} — closing`);
+        debugLog(`[swarm] handshake timeout for ${id.slice(0, 16)} — closing`);
         conn.destroy();
       }
     }, HANDSHAKE_TIMEOUT_MS);
@@ -113,7 +145,7 @@ export class AshSwarm {
           try {
             conn.write(JSON.stringify(msg) + "\n");
           } catch (err) {
-            console.debug(`[swarm] write error for peer ${id.slice(0, 16)}:`, (err as Error).message);
+            debugLog(`[swarm] write error for peer ${id.slice(0, 16)}:`, (err as Error).message);
           }
         },
       };
@@ -150,11 +182,24 @@ export class AshSwarm {
           if (sentHello) continue; // ignore duplicate challenges
           sentHello = true;
           const theirNonceHex = raw.nonce as string;
+          // Sign nonce || theirTransportKey || ourTransportKey. From this
+          // side: theirTransportKey === remoteTransportHex (the peer that
+          // sent us the challenge), ourTransportKey === localTransportHex.
+          // The verifier's perspective inverts the two — see peer:hello
+          // verification below for the symmetric reconstruction.
+          const replyPayload = `${theirNonceHex}|${remoteTransportHex}|${localTransportHex}`;
           try {
-            const sig = signEd25519(hexToBytes(theirNonceHex), this.privKey!);
-            conn.write(JSON.stringify({ type: "peer:hello", pubkey: this.pubKeyHex, sig }) + "\n");
+            const sig = signEd25519(replyPayload, this.privKey!);
+            conn.write(
+              JSON.stringify({
+                type: "peer:hello",
+                pubkey: this.pubKeyHex,
+                sig,
+                protocol_version: PROTOCOL_VERSION,
+              }) + "\n",
+            );
           } catch (err) {
-            console.debug(`[swarm] failed to send peer:hello to ${id.slice(0, 16)}:`, (err as Error).message);
+            debugLog(`[swarm] failed to send peer:hello to ${id.slice(0, 16)}:`, (err as Error).message);
             conn.destroy();
           }
           continue;
@@ -163,19 +208,29 @@ export class AshSwarm {
         // ── Handshake: peer:hello ──────────────────────────────────────────
         if (raw.type === "peer:hello") {
           if (verifiedPubkey) continue; // ignore duplicate hellos
+          // Wire-protocol gate: refuse peers whose protocol version does
+          // not match ours. Older clients without the field default to 0
+          // and are likewise refused — there is no compatibility window
+          // back to pre-versioned builds.
+          const theirProto = typeof raw.protocol_version === "number" ? raw.protocol_version : 0;
+          if (theirProto !== PROTOCOL_VERSION) {
+            debugLog(`[swarm] protocol mismatch from ${id.slice(0, 16)}: peer=${theirProto} ours=${PROTOCOL_VERSION} — closing`);
+            conn.destroy();
+            return;
+          }
           const theirPubkey = raw.pubkey as string;
           const theirSig = raw.sig as string;
           try {
             const pk = rawHexToPublicKey(theirPubkey);
-            if (!verifyEd25519(myNonceBytes, theirSig, pk)) {
-              console.debug(`[swarm] peer:hello signature invalid from ${id.slice(0, 16)} — closing`);
+            if (!verifyEd25519(challengePayload, theirSig, pk)) {
+              debugLog(`[swarm] peer:hello signature invalid from ${id.slice(0, 16)} — closing`);
               conn.destroy();
               return;
             }
             verifiedPubkey = theirPubkey;
             completeHandshake();
           } catch (err) {
-            console.debug(`[swarm] peer:hello verification error from ${id.slice(0, 16)}:`, (err as Error).message);
+            debugLog(`[swarm] peer:hello verification error from ${id.slice(0, 16)}:`, (err as Error).message);
             conn.destroy();
           }
           continue;
@@ -207,16 +262,28 @@ export class AshSwarm {
     conn.on("error", cleanup);
   }
 
-  onMessage(handler: MessageHandler): void {
+  onMessage(handler: MessageHandler): () => void {
     this.handlers.push(handler);
+    return () => {
+      const idx = this.handlers.indexOf(handler);
+      if (idx >= 0) this.handlers.splice(idx, 1);
+    };
   }
 
-  onConnect(handler: ConnectHandler): void {
+  onConnect(handler: ConnectHandler): () => void {
     this.connectHandlers.push(handler);
+    return () => {
+      const idx = this.connectHandlers.indexOf(handler);
+      if (idx >= 0) this.connectHandlers.splice(idx, 1);
+    };
   }
 
-  onDisconnect(handler: DisconnectHandler): void {
+  onDisconnect(handler: DisconnectHandler): () => void {
     this.disconnectHandlers.push(handler);
+    return () => {
+      const idx = this.disconnectHandlers.indexOf(handler);
+      if (idx >= 0) this.disconnectHandlers.splice(idx, 1);
+    };
   }
 
   broadcast(msg: P2PMessage): void {

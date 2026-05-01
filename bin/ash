@@ -1,14 +1,58 @@
-#!/bin/sh
-script="$0"
-while [ -L "$script" ]; do
-  target="$(readlink "$script")"
-  case "$target" in
-    /*) script="$target" ;;
-    *)  script="$(dirname "$script")/$target" ;;
-  esac
-done
-DIR="$(cd "$(dirname "$script")/.." && pwd)"
-exec node \
-  --import "$DIR/register.mjs" \
-  --import "file://$DIR/node_modules/tsx/dist/esm/index.mjs" \
-  "$DIR/cli/main.ts" "$@"
+#!/usr/bin/env node
+// ash CLI launcher.
+//
+// tsx (the TypeScript loader) must be passed via Node's `--import` flag —
+// it explicitly rejects being attached through `register()`. So this
+// launcher resolves `tsx/esm` relative to *this* file's real location
+// (works under npm flat hoist, pnpm strict isolation, bun, and yarn) and
+// then re-execs `node` with the right `--import` URL.
+//
+// The previous shell wrapper embedded a literal
+// `node_modules/tsx/dist/esm/index.mjs` path which broke whenever the
+// installer placed tsx anywhere else.
+
+import { realpathSync } from "node:fs";
+import { dirname, resolve as resolvePath } from "node:path";
+import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+
+const realBin = realpathSync(process.argv[1]);
+const pkgRoot = dirname(dirname(realBin));
+const require = createRequire(realBin);
+
+let tsxEsmPath;
+try {
+  tsxEsmPath = require.resolve("tsx/esm");
+} catch {
+  console.error(
+    "ash: cannot find the `tsx` runtime. Reinstall the package:\n" +
+    "  npm install -g @doheon/ash",
+  );
+  process.exit(1);
+}
+
+const result = spawnSync(
+  process.execPath,
+  [
+    "--import", pathToFileURL(tsxEsmPath).href,
+    resolvePath(pkgRoot, "cli/main.ts"),
+    ...process.argv.slice(2),
+  ],
+  { stdio: "inherit" },
+);
+
+if (result.error) {
+  console.error("ash: failed to launch:", result.error.message);
+  process.exit(1);
+}
+
+// Preserve signal-based termination so shells / CI see the right exit
+// code (130 for SIGINT, etc.) instead of a generic 1.
+if (result.signal) {
+  process.kill(process.pid, result.signal);
+  // Fallback if the signal couldn't be delivered (e.g. on Windows).
+  process.exit(1);
+}
+
+process.exit(result.status ?? 1);

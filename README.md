@@ -40,10 +40,25 @@ You (requester)             Hyperswarm DHT              Peer (acceptor)
 
 - **End-to-end encryption**: Code and diffs encrypted with AES-256-GCM. Peers exchange keys via RSA-OAEP. Server sees nothing.
 - **Signed append-only logs**: Each peer keeps a local Ed25519-signed Hypercore at `~/.ash/corestore/`. Logs are replicated peer-to-peer for balance verification.
-- **Sandboxed execution**: Acceptors run AI agents in rootless Podman containers (`--cap-drop=ALL`, `--read-only`).
+- **Sandboxed execution**: Acceptors run AI agents in rootless Podman/Docker containers with `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `/tmp` mounted as `tmpfs noexec,nosuid`, and a non-root user.
 - **Atomic claims**: Only one peer can accept a task. Settlement is atomic — credits are issued when the acceptor completes work.
 
 > **Security note**: Acceptors can read your code in plaintext inside the sandbox. Do not submit company code or anything covered by NDA.
+
+---
+
+## ⚠️ v0.1 — experimental
+
+ash is pre-1.0. The protocol, ledger format, and identity layout may change between minor versions. **Do not run on production secrets, use a throwaway machine for `ash serve`, and back up `~/.ash/` if the credits matter to you.**
+
+Things you should know going in:
+
+- **Credits are admin-issued.** Every credit on the network traces back to an `admin`-signed `MintEvent`. Loss or compromise of the admin keypair stops all new issuance — there is no decentralized fallback in v0.1.
+- **DHT bootstrap is slow on cold starts.** First peer connection can take 30-90 seconds; balance verification can occasionally fail because a remote core hasn't replicated yet. Retry the command.
+- **`ash serve` runs untrusted prompts in a sandbox; `ash mine` does not.** The mine workflow runs the AI agent on the host (not inside Podman/Docker) because it operates on a clone of the public ash repo. Don't run `ash mine` on a machine that holds anything sensitive.
+- **Network exposure.** Acceptors expose the sandbox to outbound HTTPS so the agent can reach `api.anthropic.com` / OpenAI. On Docker, sandbox containers run with `--network=bridge` (`podman` uses `slirp4netns`); we map cloud-metadata DNS names (`169.254.169.254`, `host.docker.internal`, etc.) to loopback, but cannot fully firewall the bridge from inside an unprivileged container. Don't run `ash serve` on a machine with sensitive LAN neighbours or on cloud instances with broad IAM access.
+- **Native dependencies.** `hypercore` and `hyperswarm` pull in `sodium-native` and `udx-native`. On platforms without prebuilt binaries (Alpine, some ARM Linux variants) you'll need a C build toolchain installed. `npm install` will tell you if a build fails.
+- **Identity files are local.** `~/.ash/keys/identity.ed25519` (ledger signing) and `~/.ash/keys/rsa/` (per-task AES key exchange) live on disk. Earlier builds wrote RSA keys to `~/.agent-share/keys/`; ash migrates those automatically on first run after upgrade.
 
 ---
 
@@ -282,7 +297,7 @@ admin mint or a real counterparty transaction:
 
 ### Identity and logs
 
-- **Keypair**: Ed25519 at `~/.ash/keys/ed25519`
+- **Keypair**: Ed25519 at `~/.ash/keys/identity.ed25519`
 - **Event log**: Per-user Hypercore in `~/.ash/corestore/` (append-only, Ed25519-signed, replicated over Hyperswarm)
 - **Config**: Username and model tier at `~/.ash/config.json`
 
@@ -300,10 +315,13 @@ Uses **Hyperswarm** (DHT-based). Fixed topic: `sha256("ash-network-v1")`. Peers 
 
 ### Sandbox
 
-Acceptors run AI agents in a rootless Podman container with:
+Acceptors run AI agents in a rootless Podman or Docker container with:
 - `--cap-drop=ALL` (no capabilities)
-- `--read-only` (immutable root filesystem)
-- `--tmpfs /tmp` (writable tmpdir only)
+- `--security-opt=no-new-privileges`
+- `--tmpfs /tmp:rw,noexec,nosuid,size=100m`
+- non-root `sandboxuser` inside the container
+- the agent token mounted read-only at `/run/secrets/agent-token`
+- `--add-host` entries mapping cloud-metadata DNS names to `127.0.0.1`
 
 ---
 
@@ -329,6 +347,20 @@ Check that:
 ### Agent login expired
 
 Run `ash login` or `/login` inside the TUI to refresh credentials.
+
+### Verbose handshake logs
+
+If peers don't connect or get destroyed silently, run with debug logs:
+
+```bash
+ASH_DEBUG_SWARM=1 ash
+```
+
+This prints handshake timeouts, signature failures, and protocol-version mismatches to stderr.
+
+### Wire protocol incompatibility
+
+Every peer carries `protocol_version` in `peer:hello`. Versions must match exactly — there is no compatibility window. v0.1.0 ships protocol version 2; do not mix it with any earlier internal builds.
 
 ### Podman errors
 

@@ -26,10 +26,11 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { writeSync } from "node:fs";
 
-import { loadConfig, loadIdentity, saveConfig } from "../client.ts";
+import { loadConfig, loadIdentity, loadAgent, saveConfig } from "../client.ts";
+import type { AgentType } from "../../shared/types.ts";
 import { appendLocalEvent, closeLocalStore, getNextNonce } from "../p2p_state.ts";
 import { ensureInitialized, NotInitializedError } from "../guard.ts";
-import { signEd25519 } from "../../core/crypto/ed25519.ts";
+import { signEd25519, verifyEd25519, rawHexToPublicKey } from "../../core/crypto/ed25519.ts";
 import { canonicalStringify } from "../../shared/canonical.ts";
 import {
   fetchOpenIssues,
@@ -68,6 +69,7 @@ export interface MineContext {
   privKey: import("node:crypto").KeyObject;
   ghLogin: string;
   ghEmail: string;
+  agent: AgentType;
 }
 
 // ---------------------------------------------------------------------------
@@ -382,10 +384,24 @@ function parseIssueQueryOutput(text: string): ParsedQueryIssue | null {
 // Git helpers
 // ---------------------------------------------------------------------------
 
+// Strip GitHub OAuth credentials that git might echo back in URLs
+// (e.g. "fatal: unable to access 'https://oauth2:gh_xxx@github.com/...'").
+// Without this the user's PAT could leak into terminal history when
+// `git push` fails for an unrelated reason.
+function redactGitOutput(s: string): string {
+  return s
+    .replace(/oauth2:[^@\s]+@/g, "oauth2:***@")
+    .replace(/gh[ps]_[A-Za-z0-9_]{20,}/g, "gh*_***")
+    .replace(/github_pat_[A-Za-z0-9_]+/g, "github_pat_***");
+}
+
 async function git(args: string[], cwd?: string, env?: Record<string, string>): Promise<string> {
   const proc = spawn(["git", ...args], { stdout: "pipe", stderr: "pipe", cwd, env });
   const [code, stdout, stderr] = await Promise.all([proc.exited, proc.stdout, proc.stderr]);
-  if (code !== 0) throw new Error(`git ${args[0]} failed: ${stderr.trim() || stdout.trim()}`);
+  if (code !== 0) {
+    const detail = redactGitOutput(stderr.trim() || stdout.trim());
+    throw new Error(`git ${args[0]} failed: ${detail}`);
+  }
   return stdout.trim();
 }
 
@@ -423,20 +439,42 @@ function hasTestChanges(stat: string): boolean {
 // Agent runner (captures stdout as result text)
 // ---------------------------------------------------------------------------
 
-async function runAgentCapture(prompt: string, cwd: string): Promise<{ code: number; text: string }> {
-  const proc = spawn(
-    ["claude", "-p", prompt, "--dangerously-skip-permissions"],
-    { stdout: "pipe", stderr: "pipe", cwd },
-  );
+function agentBinary(agent: AgentType): string {
+  return agent === "codex" ? "codex" : "claude";
+}
+
+function buildAgentArgs(agent: AgentType, prompt: string): { cmd: string[]; stdin?: string } {
+  if (agent === "codex") {
+    // Codex reads prompt from stdin; same flags the sandbox runner uses.
+    return {
+      cmd: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"],
+      stdin: prompt,
+    };
+  }
+  return {
+    cmd: ["claude", "-p", prompt, "--dangerously-skip-permissions"],
+  };
+}
+
+export async function isBinaryOnPath(name: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const which = spawn(["sh", "-c", `command -v ${name}`], { stdout: "pipe", stderr: "ignore" });
+    Promise.all([which.exited, which.stdout]).then(([code, out]) => {
+      resolve(code === 0 && out.trim().length > 0);
+    });
+  });
+}
+
+async function runAgentCapture(agent: AgentType, prompt: string, cwd: string): Promise<{ code: number; text: string }> {
+  const { cmd, stdin } = buildAgentArgs(agent, prompt);
+  const proc = spawn(cmd, { stdout: "pipe", stderr: "pipe", cwd, stdin });
   const [code, stdout] = await Promise.all([proc.exited, proc.stdout, proc.stderr]);
   return { code, text: stdout.trim() };
 }
 
-async function runAgentInteractive(prompt: string, cwd: string, onLine: (l: string) => void): Promise<number> {
-  const proc = spawn(
-    ["claude", "-p", prompt, "--dangerously-skip-permissions"],
-    { stdout: "pipe", stderr: "pipe", cwd, onLine: (_s, l) => onLine(l) },
-  );
+async function runAgentInteractive(agent: AgentType, prompt: string, cwd: string, onLine: (l: string) => void): Promise<number> {
+  const { cmd, stdin } = buildAgentArgs(agent, prompt);
+  const proc = spawn(cmd, { stdout: "pipe", stderr: "pipe", cwd, stdin, onLine: (_s, l) => onLine(l) });
   const [code] = await Promise.all([proc.exited, proc.stdout, proc.stderr]);
   return code;
 }
@@ -445,79 +483,67 @@ async function runAgentInteractive(prompt: string, cwd: string, onLine: (l: stri
 // Credit/EarnEvent helpers
 // ---------------------------------------------------------------------------
 
-async function buildSelfSignedEarn(
-  pubkey: string,
-  privKey: import("node:crypto").KeyObject,
-  taskId: string,
-  amount: number,
-  nonce: number,
-): Promise<EarnEvent> {
-  const now = new Date().toISOString();
-  const taskSigPayload = canonicalStringify({ task_id: taskId, amount, claimant_pubkey: pubkey, action: "earn" });
-  const counterpartyTaskSig = signEd25519(taskSigPayload, privKey);
-  const partial: Omit<EarnEvent, "signature"> = {
-    type: "earn",
-    nonce,
-    timestamp: now,
-    amount,
-    task_id: taskId,
-    counterparty_pubkey: pubkey,
-    counterparty_task_signature: counterpartyTaskSig,
-  };
-  const sig = signEd25519(canonicalStringify(partial), privKey);
-  return { ...partial, signature: sig };
+interface CosignedClaim {
+  cosignerPubkey: string;
+  cosignerTaskSignature: string;
 }
 
+/**
+ * Broadcasts a mine claim and waits for any independent peer to cosign.
+ * Returns null if the discovery window elapses without a valid cosign.
+ *
+ * Note: this collects the cosign material only — it does NOT sign the
+ * EarnEvent here. Nonces must be read from the local Hypercore at the
+ * moment of append (see earnCredits below) so parallel flows in the same
+ * process don't collide on a stale nonce.
+ */
 async function broadcastAndCollectCosign(opts: {
   claimId: string;
   claimantPubkey: string;
   privKey: import("node:crypto").KeyObject;
-  nonce: number;
   taskId: string;
   githubRef: string;
   action: MineAction;
   amount: number;
   prUrl: string;
-  fallbackEarn: EarnEvent;
-}): Promise<EarnEvent> {
-  const { claimId, claimantPubkey, privKey, nonce, taskId, githubRef, action, amount, prUrl, fallbackEarn } = opts;
+  announceNonce: number;
+}): Promise<CosignedClaim | null> {
+  const { claimId, claimantPubkey, privKey, taskId, githubRef, action, amount, prUrl, announceNonce } = opts;
 
-  return new Promise<EarnEvent>((resolve) => {
+  // Require an independent cosigner. If no peer responds within the
+  // discovery window, return null and let the caller skip the earn. The
+  // previous self-mint fallback was retired because it credited the
+  // miner with no third-party verification.
+  return new Promise<CosignedClaim | null>((resolve) => {
     const swarm = new AshSwarm();
     let resolved = false;
 
-    const finish = (earn: EarnEvent) => {
+    const finish = (claim: CosignedClaim | null) => {
       if (resolved) return;
       resolved = true;
       swarm.destroy().catch(() => undefined);
-      resolve(earn);
+      resolve(claim);
     };
 
-    const timer = setTimeout(() => finish(fallbackEarn), 8_000);
+    const timer = setTimeout(() => finish(null), 12_000);
 
     swarm.join(privKey, claimantPubkey).then(() => {
       swarm.onMessage((_peer, msg) => {
         if (msg.type !== "mine:cosign" || msg.claim_id !== claimId) return;
+        // Reject self-cosigned claims: the cosigner must be an independent peer.
+        if (msg.cosigner_pubkey === claimantPubkey) return;
         clearTimeout(timer);
-        const now = new Date().toISOString();
-        const partial: Omit<EarnEvent, "signature"> = {
-          type: "earn",
-          nonce,
-          timestamp: now,
-          amount,
-          task_id: taskId,
-          counterparty_pubkey: msg.cosigner_pubkey,
-          counterparty_task_signature: msg.cosigner_task_signature,
-        };
-        const sig = signEd25519(canonicalStringify(partial), privKey);
-        finish({ ...partial, signature: sig });
+        finish({
+          cosignerPubkey: msg.cosigner_pubkey,
+          cosignerTaskSignature: msg.cosigner_task_signature,
+        });
       });
 
       swarm.broadcast({
         type: "mine:claim",
         claim_id: claimId,
         claimant_pubkey: claimantPubkey,
-        claimant_next_nonce: nonce,
+        claimant_next_nonce: announceNonce,
         github_ref: githubRef,
         task_id: taskId,
         action,
@@ -525,7 +551,7 @@ async function broadcastAndCollectCosign(opts: {
         pr_url: prUrl,
         timestamp: new Date().toISOString(),
       });
-    }).catch(() => finish(fallbackEarn));
+    }).catch(() => finish(null));
   });
 }
 
@@ -541,22 +567,69 @@ async function earnCredits(opts: {
   log: Logger;
 }): Promise<void> {
   const { myPub, privKey, taskId, githubRef, action, amount, url, extra, log } = opts;
-  const nonce = await getNextNonce(myPub);
-  const selfEarn = await buildSelfSignedEarn(myPub, privKey, taskId, amount, nonce);
 
   log(`  ${D}broadcasting mine:claim…${R}\n`);
-  const earnEvent = await broadcastAndCollectCosign({
+  // Announce a tentative nonce so cosigners can sanity-check against
+  // their cached view of our log. The actual nonce written to disk is
+  // re-read just before append (see below) so a parallel flow can't
+  // race us into the same slot.
+  const announceNonce = await getNextNonce(myPub);
+  const claim = await broadcastAndCollectCosign({
     claimId: randomUUID(),
     claimantPubkey: myPub,
     privKey,
-    nonce,
     taskId,
     githubRef,
     action,
     amount,
     prUrl: url,
-    fallbackEarn: selfEarn,
+    announceNonce,
   });
+
+  if (!claim) {
+    log(`  ${YL}⚠${R}  No cosigner responded — credits not awarded.\n`);
+    log(`  ${D}      (a peer must run \`ash serve\` to verify and cosign)${R}\n`);
+    return;
+  }
+
+  // Verify the cosigner's signature locally before append. Without this
+  // check we'd happily store an EarnEvent that fails replay forever
+  // (silent credit loss on next process boot). Re-derive the exact
+  // bytes the cosigner is expected to have signed and verify them.
+  const expectedTaskPayload = canonicalStringify({
+    task_id: taskId,
+    amount,
+    claimant_pubkey: myPub,
+    action: "earn",
+  });
+  let cosignerPub;
+  try {
+    cosignerPub = rawHexToPublicKey(claim.cosignerPubkey);
+  } catch {
+    log(`  ${YL}⚠${R}  cosigner pubkey malformed — credits not awarded.\n`);
+    return;
+  }
+  if (!verifyEd25519(expectedTaskPayload, claim.cosignerTaskSignature, cosignerPub)) {
+    log(`  ${YL}⚠${R}  cosigner signature did not verify — credits not awarded.\n`);
+    return;
+  }
+
+  // Read nonce immediately before signing+appending. This collapses the
+  // window where two parallel flows could compute the same value.
+  const appendNonce = await getNextNonce(myPub);
+  const partial: Omit<EarnEvent, "signature"> = {
+    type: "earn",
+    nonce: appendNonce,
+    timestamp: new Date().toISOString(),
+    amount,
+    task_id: taskId,
+    counterparty_pubkey: claim.cosignerPubkey,
+    counterparty_task_signature: claim.cosignerTaskSignature,
+  };
+  const earnEvent: EarnEvent = {
+    ...partial,
+    signature: signEd25519(canonicalStringify(partial), privKey),
+  };
 
   await appendLocalEvent(myPub, earnEvent);
   const extraNote = extra ? `  (${extra})` : "";
@@ -574,6 +647,7 @@ async function doPrCreate(
   privKey: import("node:crypto").KeyObject,
   ghLogin: string,
   ghEmail: string,
+  agent: AgentType,
   log: Logger,
   confirm: ConfirmFn,
 ): Promise<boolean> {
@@ -586,7 +660,7 @@ async function doPrCreate(
     await git(["clone", "--depth=1", `https://github.com/${ASH_REPO}.git`, tmpDir]);
 
     log(`  ${CY}deciding implement vs close…${R}\n`);
-    const { code: vcode, text: vtext } = await runAgentCapture(buildPrCreateVerdictPrompt(issue), tmpDir);
+    const { code: vcode, text: vtext } = await runAgentCapture(agent, buildPrCreateVerdictPrompt(issue), tmpDir);
     log(`  ${D}agent exit: ${vcode}${R}\n`);
     const verdict = parsePrCreateVerdict(vtext);
 
@@ -622,7 +696,7 @@ async function doPrCreate(
     await git(["checkout", "-b", branch], tmpDir);
 
     log(`  ${CY}running agent…${R}\n`);
-    const code = await runAgentInteractive(buildCreatePrompt(issue), tmpDir, (l) => log(`  ${D}${l}${R}\n`));
+    const code = await runAgentInteractive(agent, buildCreatePrompt(issue), tmpDir, (l) => log(`  ${D}${l}${R}\n`));
     log(`\n  ${D}agent exit: ${code}${R}\n`);
 
     const diffStat = await git(["diff", "--stat", "HEAD"], tmpDir).catch(() => "");
@@ -678,6 +752,7 @@ async function doPrReview(
   token: string,
   myPub: string,
   privKey: import("node:crypto").KeyObject,
+  agent: AgentType,
   log: Logger,
   confirm: ConfirmFn,
 ): Promise<boolean> {
@@ -690,7 +765,7 @@ async function doPrReview(
   const tmpDir = await mkdtemp(join(tmpdir(), "ash-review-"));
   try {
     log(`  ${CY}running agent…${R}\n`);
-    const { code, text } = await runAgentCapture(buildReviewPrompt(pr, diff), tmpDir);
+    const { code, text } = await runAgentCapture(agent, buildReviewPrompt(pr, diff), tmpDir);
     log(`  ${D}agent exit: ${code}${R}\n`);
 
     const parsed = parseReviewVerdict(text);
@@ -765,6 +840,7 @@ async function doPrFix(
   privKey: import("node:crypto").KeyObject,
   ghLogin: string,
   ghEmail: string,
+  agent: AgentType,
   log: Logger,
   confirm: ConfirmFn,
 ): Promise<boolean> {
@@ -795,7 +871,7 @@ async function doPrFix(
       : buildFixSelfPrompt(pr, diff);
 
     log(`  ${CY}running agent…${R}\n`);
-    const code = await runAgentInteractive(prompt, tmpDir, (l) => log(`  ${D}${l}${R}\n`));
+    const code = await runAgentInteractive(agent, prompt, tmpDir, (l) => log(`  ${D}${l}${R}\n`));
     log(`\n  ${D}agent exit: ${code}${R}\n`);
 
     const diffStat = await git(["diff", "--stat", "HEAD"], tmpDir).catch(() => "");
@@ -839,6 +915,7 @@ async function doIssueQuery(
   token: string,
   myPub: string,
   privKey: import("node:crypto").KeyObject,
+  agent: AgentType,
   log: Logger,
   confirm: ConfirmFn,
 ): Promise<boolean> {
@@ -851,7 +928,7 @@ async function doIssueQuery(
     await git(["clone", "--depth=1", `https://github.com/${ASH_REPO}.git`, tmpDir]);
 
     log(`  ${CY}running agent…${R}\n`);
-    const { code, text } = await runAgentCapture(buildIssueQueryPrompt(query), tmpDir);
+    const { code, text } = await runAgentCapture(agent, buildIssueQueryPrompt(query), tmpDir);
     log(`  ${D}agent exit: ${code}${R}\n`);
 
     const parsed = parseIssueQueryOutput(text);
@@ -915,7 +992,8 @@ async function loadCommonContext(): Promise<MineContext | null> {
 
   const ghUser = await fetchCurrentUser(token);
   const ghEmail = ghUser.email ?? `${ghUser.login}@users.noreply.github.com`;
-  return { token, myPub, privKey, ghLogin: ghUser.login, ghEmail };
+  const agent = await loadAgent();
+  return { token, myPub, privKey, ghLogin: ghUser.login, ghEmail, agent };
 }
 
 /**
@@ -931,7 +1009,8 @@ export async function loadMineContext(): Promise<MineContext | { error: string }
     const { priv: privKey } = await loadIdentity();
     const ghUser = await fetchCurrentUser(token);
     const ghEmail = ghUser.email ?? `${ghUser.login}@users.noreply.github.com`;
-    return { token, myPub: cfg.pubkey, privKey, ghLogin: ghUser.login, ghEmail };
+    const agent = await loadAgent();
+    return { token, myPub: cfg.pubkey, privKey, ghLogin: ghUser.login, ghEmail, agent };
   } catch (err) {
     return { error: (err as Error).message };
   }
@@ -947,9 +1026,18 @@ export async function runMineCore(
   log: Logger,
   confirm: ConfirmFn,
 ): Promise<void> {
-  const { token, myPub, privKey, ghLogin, ghEmail } = ctx;
+  const { token, myPub, privKey, ghLogin, ghEmail, agent } = ctx;
 
-  log(`\n  ${B}${CY}ash mine${R}  ${D}· up to ${opts.count} task(s)  · @${ghLogin}${R}\n\n`);
+  // Precheck the configured agent binary so users get a clear error
+  // rather than a cryptic "spawn ENOENT" mid-cycle.
+  const binary = agentBinary(agent);
+  if (!(await isBinaryOnPath(binary))) {
+    log(`  ${YL}⚠${R}  \`${binary}\` is not on PATH.\n`);
+    log(`  ${D}      Install it (or pick a different agent via \`ash login\`) and retry.${R}\n\n`);
+    return;
+  }
+
+  log(`\n  ${B}${CY}ash mine${R}  ${D}· up to ${opts.count} task(s)  · @${ghLogin}  · agent: ${agent}${R}\n\n`);
 
   let done = 0;
   while (done < opts.count) {
@@ -965,11 +1053,11 @@ export async function runMineCore(
     try {
       let acted = false;
       if (decision.action === "pr_fix") {
-        acted = await doPrFix(decision.pr, decision.mode, decision.feedback, token, myPub, privKey, ghLogin, ghEmail, log, confirm);
+        acted = await doPrFix(decision.pr, decision.mode, decision.feedback, token, myPub, privKey, ghLogin, ghEmail, agent, log, confirm);
       } else if (decision.action === "pr_review") {
-        acted = await doPrReview(decision.pr, token, myPub, privKey, log, confirm);
+        acted = await doPrReview(decision.pr, token, myPub, privKey, agent, log, confirm);
       } else if (decision.action === "pr_create") {
-        acted = await doPrCreate(decision.issue, token, myPub, privKey, ghLogin, ghEmail, log, confirm);
+        acted = await doPrCreate(decision.issue, token, myPub, privKey, ghLogin, ghEmail, agent, log, confirm);
       }
       if (!acted) break;
       done++;
@@ -989,12 +1077,19 @@ export async function runIssueQueryCore(
   log: Logger,
   confirm: ConfirmFn,
 ): Promise<void> {
-  const { token, myPub, privKey, ghLogin } = ctx;
+  const { token, myPub, privKey, ghLogin, agent } = ctx;
 
-  log(`\n  ${B}${CY}ash mine${R}  ${D}· query mode  · @${ghLogin}${R}\n`);
+  const binary = agentBinary(agent);
+  if (!(await isBinaryOnPath(binary))) {
+    log(`  ${YL}⚠${R}  \`${binary}\` is not on PATH.\n`);
+    log(`  ${D}      Install it (or pick a different agent via \`ash login\`) and retry.${R}\n\n`);
+    return;
+  }
+
+  log(`\n  ${B}${CY}ash mine${R}  ${D}· query mode  · @${ghLogin}  · agent: ${agent}${R}\n`);
 
   try {
-    await doIssueQuery(query, token, myPub, privKey, log, confirm);
+    await doIssueQuery(query, token, myPub, privKey, agent, log, confirm);
   } catch (err) {
     log(`  ${YL}⚠${R}  ${(err as Error).message}\n`);
   }

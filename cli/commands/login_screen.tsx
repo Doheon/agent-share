@@ -117,8 +117,14 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
     if (!githubDeviceCode) return;
     let cancelled = false;
     let currentMs = githubInterval * 1000;
+    // Track the pending timeout so cleanup can clear it. Without this
+    // a cancelled effect (re-render with a new device code) leaks the
+    // timer chain into the background, eventually racing with the new
+    // chain.
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
     const poll = async () => {
+      timer = null;
       if (cancelled || !mountedRef.current) return;
       try {
         const res = await fetch("https://github.com/login/oauth/access_token", {
@@ -143,15 +149,18 @@ export function LoginScreen({ onClose }: LoginScreenProps): React.ReactNode {
         if (data.error === "expired_token") { setStep({ kind: "github", phase: "error", error: "code expired — press enter to try again" }); return; }
         if (data.error === "access_denied") { setStep({ kind: "github", phase: "error", error: "access denied" }); return; }
         // authorization_pending or slow_down: keep polling.
-        setTimeout(poll, currentMs);
+        timer = setTimeout(poll, currentMs);
       } catch {
         if (cancelled || !mountedRef.current) return;
-        setTimeout(poll, currentMs);
+        timer = setTimeout(poll, currentMs);
       }
     };
 
-    setTimeout(poll, currentMs);
-    return () => { cancelled = true; };
+    timer = setTimeout(poll, currentMs);
+    return () => {
+      cancelled = true;
+      if (timer) { clearTimeout(timer); timer = null; }
+    };
   }, [githubDeviceCode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Binary check for claude/codex steps.

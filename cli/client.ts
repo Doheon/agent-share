@@ -8,8 +8,11 @@
  * Layout:
  *   ~/.ash/config.json        — username, pubkey, model tier, agent, runtime
  *   ~/.ash/keys/identity.ed25519[.pub] — Ed25519 identity keypair
- *   ~/.ash/logs/              — Hypercore append-only event log (per pubkey)
- *   ~/.agent-share/keys/<pubkey>.pem  — RSA-OAEP keypair for AES key exchange
+ *   ~/.ash/keys/rsa/<pubkey>.pem      — RSA-OAEP keypair for AES key exchange
+ *   ~/.ash/corestore/         — Hypercore append-only event log (per pubkey)
+ *
+ * Earlier builds stored RSA keys under ~/.agent-share/keys; keypair.ts
+ * migrates those on first read after upgrade.
  */
 
 import { join } from "node:path";
@@ -110,14 +113,29 @@ export async function createIdentity(): Promise<{ priv: KeyObject; pub: KeyObjec
 }
 
 export async function loadIdentity(): Promise<{ priv: KeyObject; pub: KeyObject; pubHex: string }> {
+  // "Missing" and "corrupted" need different error messages: the first
+  // tells the user to run `ash init`; the second points at a parse
+  // failure and includes the path so they can back up and regenerate.
+  let privPem: string;
+  let pubPem: string;
   try {
-    const privPem = await readFile(ED25519_PRIV, "utf-8");
-    const pubPem = await readFile(ED25519_PUB, "utf-8");
+    privPem = await readFile(ED25519_PRIV, "utf-8");
+    pubPem = await readFile(ED25519_PUB, "utf-8");
+  } catch {
+    throw new Error(`Identity key not found at ${ED25519_PRIV}. Run \`ash init\`.`);
+  }
+  try {
     const priv = importEd25519PrivatePem(privPem);
     const pub = importEd25519PublicPem(pubPem);
     return { priv, pub, pubHex: publicKeyToRawHex(pub) };
-  } catch {
-    throw new Error(`Identity key not found at ${ED25519_PRIV}. Run \`ash init\`.`);
+  } catch (err) {
+    throw new Error(
+      `Identity key at ${ED25519_PRIV} is corrupted (${(err as Error).message}).\n` +
+      `  Back up the file and re-run \`ash init\`:\n` +
+      `    mv ${ED25519_PRIV} ${ED25519_PRIV}.bak\n` +
+      `    mv ${ED25519_PUB} ${ED25519_PUB}.bak\n` +
+      `    ash init`,
+    );
   }
 }
 

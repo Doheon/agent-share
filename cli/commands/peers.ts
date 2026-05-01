@@ -27,13 +27,14 @@ export const peersCommand = new Command("peers")
 
     const myPub = cfg.pubkey;
     const myLedgerKey = await getLedgerCoreKey(myPub).catch(() => undefined);
+    const identity = await loadIdentity();
 
     const swarm = new AshSwarm();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let repSwarm: any = null;
 
     try {
-      await swarm.join();
+      await swarm.join(identity.priv, identity.pubHex);
     } catch (err) {
       console.error(`\n  Failed to join network: ${(err as Error).message}\n`);
       await closeLocalStore().catch(() => undefined);
@@ -53,9 +54,13 @@ export const peersCommand = new Command("peers")
 
     const discovered = new Map<string, { ledgerKey?: string; model?: string }>();
 
-    swarm.onMessage((_peer, msg: P2PMessage) => {
+    swarm.onMessage((peer, msg: P2PMessage) => {
       if (msg.type === "peer:info") {
         if (msg.pubkey === myPub) return;
+        // Bind self-declared `msg.pubkey` to the handshake-verified
+        // identity before persisting anything, otherwise a hostile peer
+        // could seed our cache with a mapping under someone else's name.
+        if (msg.pubkey !== peer.pubkey) return;
         registerPeerLedgerKey(msg.pubkey, msg.ledger_core_key).catch(() => undefined);
         discovered.set(msg.pubkey, {
           ledgerKey: msg.ledger_core_key,

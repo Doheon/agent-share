@@ -49,6 +49,21 @@ export function networkMode(runtime: ContainerRuntime, hasHosts: boolean): strin
   return runtime === "podman" ? "slirp4netns:allow_host_loopback=false" : "bridge";
 }
 
+// Cloud metadata services and well-known link-local hosts that an agent's
+// outbound HTTP path could hit on a `--network=bridge` Docker container.
+// Mapping these names to 127.0.0.1 in /etc/hosts neutralizes DNS-based
+// exfiltration; direct-IP access to 169.254.169.254 still requires
+// host-level firewall rules and is documented as a residual risk in
+// README.md (see "Network exposure" notice).
+const SANDBOX_BLOCKED_HOSTS = [
+  "metadata.google.internal",
+  "metadata",
+  "instance-data",
+  "instance-data.ec2.internal",
+  "host.docker.internal",
+  "gateway.docker.internal",
+];
+
 export async function runAgentInSandbox(opts: SandboxOptions): Promise<RunResult> {
   const { taskDir, agent, prompt, allowedHosts, onLog, timeoutMs = 25 * 60 * 1000 } = opts;
 
@@ -77,8 +92,14 @@ export async function runAgentInSandbox(opts: SandboxOptions): Promise<RunResult
     } catch {
       throw new Error("No Codex session found. Run: ash init");
     }
-    authArgs.push(`--volume=${codexAuthDir}:/home/sandboxuser/.codex`);
+    // Read-only mount: a malicious payload must not be able to overwrite
+    // the user's Codex session credentials on the host.
+    authArgs.push(`--volume=${codexAuthDir}:/home/sandboxuser/.codex:ro`);
   }
+
+  const blockedHosts = allowedHosts.length > 0
+    ? SANDBOX_BLOCKED_HOSTS.flatMap((h) => ["--add-host", `${h}:127.0.0.1`])
+    : [];
 
   const args: string[] = [
     "run", "--rm",
@@ -90,6 +111,7 @@ export async function runAgentInSandbox(opts: SandboxOptions): Promise<RunResult
     "--tmpfs", "/tmp:rw,noexec,nosuid,size=100m",
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",
+    ...blockedHosts,
     ...authArgs,
     "--workdir", "/workspace",
     FULL_IMAGE,

@@ -23,6 +23,7 @@ import {
 } from "../../core/crypto/rsa.ts";
 import { scanDirectory, formatScanResults } from "../../core/packaging/secret_scanner.ts";
 import { packDirectory } from "../../core/packaging/pack.ts";
+import { buildTaskAad } from "../../core/crypto/aes.ts";
 import { applyPatch, getChangedFiles } from "../../core/diff/apply.ts";
 import { signEd25519 } from "../../core/crypto/ed25519.ts";
 import { canonicalStringify } from "../../shared/canonical.ts";
@@ -223,7 +224,7 @@ function ChatApp({
 
   // Setup swarm listeners
   useEffect(() => {
-    swarm.onConnect(() => {
+    const unsubConnect = swarm.onConnect(() => {
       setPeerCount(swarm.getPeers().length);
       swarm.broadcast({
         type: "peer:info",
@@ -232,7 +233,7 @@ function ChatApp({
         model_tier: currentModelRef.current,
       });
     });
-    swarm.onDisconnect(() => setPeerCount(swarm.getPeers().length));
+    const unsubDisconnect = swarm.onDisconnect(() => setPeerCount(swarm.getPeers().length));
 
     const claimAndProcess = async (
       peer: SwarmPeer,
@@ -319,11 +320,16 @@ function ChatApp({
       }
     };
 
-    swarm.onMessage(async (peer, msg) => {
+    const unsubMessage = swarm.onMessage(async (peer, msg) => {
       // Cache any ledger core key the peer advertises so future cross-ref
       // at balance replay can open their real Hypercore.
       if (msg.type === "peer:info") {
-        registerPeerLedgerKey(msg.pubkey, msg.ledger_core_key).catch(() => undefined);
+        // Only trust the ledger key when peer:info matches the
+        // handshake-verified identity (cache-poisoning defense — see
+        // serve.ts for the same pattern).
+        if (msg.pubkey === peer.pubkey) {
+          registerPeerLedgerKey(msg.pubkey, msg.ledger_core_key).catch(() => undefined);
+        }
         return;
       }
 
@@ -400,6 +406,11 @@ function ChatApp({
           break;
       }
     });
+    return () => {
+      unsubConnect();
+      unsubDisconnect();
+      unsubMessage();
+    };
   }, []);
 
   const doExit = useCallback(() => {
@@ -419,7 +430,9 @@ function ChatApp({
 
   useEffect(() => {
     process.on("SIGTERM", doExit);
-    return () => process.off("SIGTERM", doExit);
+    return () => {
+      process.off("SIGTERM", doExit);
+    };
   }, [doExit]);
 
   const creditsFor = (t: string) => models.find((m) => m.tier === t)?.credits ?? 15;
@@ -461,6 +474,7 @@ function ChatApp({
     addMsg(`  ${FRAMES[0]} packaging…`, "#6b6b6b");
 
     const taskId = randomUUID();
+    const aad = buildTaskAad(taskId, userId);
     let aesKeyRaw: Uint8Array;
     let ciphertextB64: string;
     let ivB64: string;
@@ -473,7 +487,7 @@ function ChatApp({
         addMsg(formatScanResults(scan), "#ff8888");
         return;
       }
-      const { ciphertext, iv, aesKeyRaw: keyRaw } = await packDirectory(absDir);
+      const { ciphertext, iv, aesKeyRaw: keyRaw } = await packDirectory(absDir, aad);
       aesKeyRaw = keyRaw;
       ciphertextB64 = Buffer.from(ciphertext).toString("base64");
       ivB64 = Buffer.from(iv).toString("base64");
@@ -599,8 +613,15 @@ function ChatApp({
           addMsg(`  ⎿ Apply? (y=${fullCost}cr · n=${halfCost}cr · 60s no reply = ${halfCost}cr)`, "#ffcc44");
 
           const decision = await new Promise<"y" | "n" | "timeout">((resolve) => {
-            confirmResolveRef.current = (apply) => resolve(apply ? "y" : "n");
-            setTimeout(() => resolve("timeout"), 60_000);
+            let done = false;
+            const settle = (v: "y" | "n" | "timeout") => {
+              if (done) return;
+              done = true;
+              clearTimeout(t);
+              resolve(v);
+            };
+            confirmResolveRef.current = (apply) => settle(apply ? "y" : "n");
+            const t = setTimeout(() => settle("timeout"), 60_000);
           });
           confirmResolveRef.current = null;
 
@@ -637,8 +658,15 @@ function ChatApp({
 
         // Wait for acceptor's task:settle decision.
         const settleAction = await new Promise<"approve" | "reject">((resolve) => {
-          p.resolveSettle = resolve;
-          setTimeout(() => resolve("reject"), 30_000);
+          let done = false;
+          const settle = (v: "approve" | "reject") => {
+            if (done) return;
+            done = true;
+            clearTimeout(t);
+            resolve(v);
+          };
+          p.resolveSettle = settle;
+          const t = setTimeout(() => settle("reject"), 30_000);
         });
         p.resolveSettle = undefined;
 

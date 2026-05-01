@@ -8,7 +8,6 @@
 
 import { test, expect, afterEach } from "vitest";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { rm, stat } from "node:fs/promises";
 import {
   hasKeyPair,
@@ -16,8 +15,9 @@ import {
   loadPrivateKey,
   getOrCreateKeyPair,
 } from "./keypair.ts";
+import { ASH_DIR } from "../../cli/ash_dir.ts";
 
-const KEYS_DIR = join(homedir(), ".agent-share", "keys");
+const KEYS_DIR = join(ASH_DIR, "keys", "rsa");
 
 const testIds: string[] = [];
 

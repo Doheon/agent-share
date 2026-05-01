@@ -93,7 +93,9 @@ export type P2PMessage =
       // Step 2 — receiver signs the received nonce with its Ed25519 private key.
       type: "peer:hello";
       pubkey: string; // Ed25519 identity key (hex)
-      sig: string;    // Ed25519 signature over the received nonce bytes (hex)
+      sig: string;    // Ed25519 signature over (nonce || theirTransport || ourTransport)
+      /** Wire protocol version. Peers refuse mismatched majors at handshake. */
+      protocol_version: number;
     }
   | {
       type: "peer:info";

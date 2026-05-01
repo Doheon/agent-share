@@ -39,13 +39,24 @@ export async function getPeerLedgerKey(pubkey: string): Promise<string | undefin
   return c[pubkey];
 }
 
+const PUBKEY_RE = /^[0-9a-f]{64}$/;
+const CORE_KEY_RE = /^[0-9a-f]{64}$/;
+
 export async function registerPeerLedgerKey(
   pubkey: string | undefined,
   coreKeyHex: string | undefined,
 ): Promise<void> {
   if (!pubkey || !coreKeyHex) return;
+  // Reject malformed values from adversarial peers — pubkey and core key
+  // are 32-byte hex strings.
+  if (!PUBKEY_RE.test(pubkey) || !CORE_KEY_RE.test(coreKeyHex)) return;
+
   const c = await loadCache();
-  if (c[pubkey] === coreKeyHex) return;
+  // First-seen wins. Without this, a hostile peer could broadcast a
+  // peer:info with a forged ledger_core_key for a known pubkey and
+  // poison the cache so subsequent balance lookups for that pubkey hit
+  // the attacker's core instead of the legitimate one.
+  if (c[pubkey]) return;
   c[pubkey] = coreKeyHex;
   const snapshot = { ...c };
   writeQueue = writeQueue
