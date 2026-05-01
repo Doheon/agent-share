@@ -7,169 +7,111 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Runtime: Node.js](https://img.shields.io/badge/Runtime-Node.js-green)](https://nodejs.org)
 
----
-
-## Why ash?
-
-Claude Code's $20 plan has a **5-hour session limit**. The next tier is $100/month.
-
-Most developers don't use AI tools heavily every day. **ash** lets you earn credits by accepting coding tasks during idle time, and spend them on AI-assisted development when you need it.
+Claude Code's $20 plan caps you at a **5-hour session**. The next tier is $100/month. Most days you don't need AI all day — **ash** lets you earn credits during idle hours, then spend them when you actually need to ship.
 
 ---
 
-## How it works
+## Getting started
 
-ash is a peer-to-peer network, not a server. When you submit a task:
-
-```
-You (requester)             Hyperswarm DHT              Peer (acceptor)
-      │                           │                          │
-      ├─ Prompt + code ──────────►│                          │
-      │    (AES-256-GCM)          │ ◄────── peer:announce ───┤
-      │                           │                          │
-      │ ◄─── RSA pubkey ──────────┼──────────────────────────┤
-      ├─ AES key (RSA-OAEP) ─────►│ ────────────────────────►│
-      │                           │                   decrypt │
-      │                           │                   run AI  │
-      │ ◄─── git diff ────────────┼──────────────────────────┤
-      │     (AES-256-GCM)         │     settlement event      │
-      └─ Credits updated          │                          │
-```
-
-**Key properties:**
-
-- **End-to-end encryption**: Code and diffs encrypted with AES-256-GCM. Peers exchange keys via RSA-OAEP. Server sees nothing.
-- **Signed append-only logs**: Each peer keeps a local Ed25519-signed Hypercore at `~/.ash/corestore/`. Logs are replicated peer-to-peer for balance verification.
-- **Sandboxed execution**: Acceptors run AI agents in rootless Podman/Docker containers with `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `/tmp` mounted as `tmpfs noexec,nosuid`, and a non-root user.
-- **Atomic claims**: Only one peer can accept a task. Settlement is atomic — credits are issued when the acceptor completes work.
-
-> **Security note**: Acceptors can read your code in plaintext inside the sandbox. Do not submit company code or anything covered by NDA.
-
----
-
-## ⚠️ v0.1 — experimental
-
-ash is pre-1.0. The protocol, ledger format, and identity layout may change between minor versions. **Do not run on production secrets, use a throwaway machine for `ash serve`, and back up `~/.ash/` if the credits matter to you.**
-
-Things you should know going in:
-
-- **Credits are admin-issued.** Every credit on the network traces back to an `admin`-signed `MintEvent`. Loss or compromise of the admin keypair stops all new issuance — there is no decentralized fallback in v0.1.
-- **DHT bootstrap is slow on cold starts.** First peer connection can take 30-90 seconds; balance verification can occasionally fail because a remote core hasn't replicated yet. Retry the command.
-- **`ash serve` runs untrusted prompts in a sandbox; `ash mine` does not.** The mine workflow runs the AI agent on the host (not inside Podman/Docker) because it operates on a clone of the public ash repo. Don't run `ash mine` on a machine that holds anything sensitive.
-- **Network exposure.** Acceptors expose the sandbox to outbound HTTPS so the agent can reach `api.anthropic.com` / OpenAI. On Docker, sandbox containers run with `--network=bridge` (`podman` uses `slirp4netns`); we map cloud-metadata DNS names (`169.254.169.254`, `host.docker.internal`, etc.) to loopback, but cannot fully firewall the bridge from inside an unprivileged container. Don't run `ash serve` on a machine with sensitive LAN neighbours or on cloud instances with broad IAM access.
-- **Native dependencies.** `hypercore` and `hyperswarm` pull in `sodium-native` and `udx-native`. On platforms without prebuilt binaries (Alpine, some ARM Linux variants) you'll need a C build toolchain installed. `npm install` will tell you if a build fails.
-- **Identity files are local.** `~/.ash/keys/identity.ed25519` (ledger signing) and `~/.ash/keys/rsa/` (per-task AES key exchange) live on disk. Earlier builds wrote RSA keys to `~/.agent-share/keys/`; ash migrates those automatically on first run after upgrade.
-
----
-
-## Installation
-
-**Requirements:** Node.js 18+, git, Podman or Docker (required for `ash serve`)
+### 1. Install
 
 ```bash
 npm install -g @doheon/ash
 ash init
 ```
 
-This creates `~/.ash/` with your Ed25519 keypair, Corestore, and configuration.
+`ash init` walks you through:
+- pick a username
+- choose Claude Code or Codex as your agent
+- log in to your AI provider (creates a long-lived sandbox token)
+- check Podman / Docker is available (required for `ash serve`)
 
-### Install from source
+State lives at `~/.ash/`. **Requires Node 18+, git, Podman or Docker.**
+
+### 2. Try it — interactive chat
 
 ```bash
-git clone https://github.com/Doheon/agent-share
-cd agent-share
-npm install
-npm install -g .
-ash init
+ash
+```
+
+Drops you into a TUI. Type a prompt; the network finds a peer to run it; the diff is shown; you choose to apply or skip. **You're using credits earned by another peer.**
+
+```text
+❯ refactor cli/main.ts to lazy-import command handlers
+  ⎿ packaged  (12.3 KB)
+  ⎿ matched · running…
+  ⎿ 2 files changed  +18 / -5
+  ⎿ Apply? (y=6cr · n=3cr · 60s = 3cr)
+```
+
+### 3. Earn credits — accept tasks
+
+On a machine you don't mind sharing CPU with (use a separate one if you can):
+
+```bash
+ash serve              # accept indefinitely
+ash serve -n 5         # accept up to 5 tasks then exit
+```
+
+The acceptor downloads the requester's encrypted code, runs your AI agent in a Podman/Docker sandbox, and ships back the diff. **Credits land in your local ledger atomically when the requester applies the diff.**
+
+### 4. Earn credits — mine on the ash repo
+
+```bash
+ash mine               # auto-cycle one task
+ash mine -n 3          # up to 3 tasks
+ash mine "history command misses mint events"  # file an issue with code evidence
+```
+
+mine pays you for contributing to ash itself: implementing issues, reviewing PRs, filing well-evidenced bug reports.
+
+### 5. Check your balance anytime
+
+```bash
+ash status             # username · balance · pubkey · agent login state
+ash history            # full earn/spend/mint event log
+ash peers              # who's online and their balances
 ```
 
 ---
 
-## Quick start
+## What you can do
 
-### Set up your identity and agent
+| Goal | Command |
+|------|---------|
+| Run an AI prompt against your current project | `ash` (TUI) or `ash run "<prompt>"` |
+| Earn credits by serving tasks | `ash serve` |
+| Earn credits by improving the ash repo | `ash mine` |
+| File a bug report with verified evidence | `ash mine "<query>"` |
+| Switch model (haiku / sonnet / opus / codex) | `ash set <tier>` |
+| See your identity and balance | `ash status` |
+| Browse your event log | `ash history` |
+| List online peers | `ash peers` |
 
-```bash
-ash init
-```
+Inside the TUI, every command is a slash command (`/serve`, `/mine`, `/model`, `/status`, `/history`, `/peers`, `/login`, `/help`, `/quit`).
 
-Prompts for:
-- Username
-- Preferred AI agent (Claude Code or Codex)
-- Environment checks (Podman/Docker, git, etc.)
-- Agent login (guides you through authentication)
+---
 
-### Log in to AI agents
+## Commands reference
 
-```bash
-ash login
-```
+| Command | Purpose |
+|---------|---------|
+| `ash init` | First-time setup (keypair, username, agent) |
+| `ash` | Interactive chat (TUI) |
+| `ash run "<prompt>"` | One-shot prompt without TUI |
+| `ash serve [-n N]` | Accept tasks and earn credits |
+| `ash serve --allow-self` | Include your own tasks (testing) |
+| `ash mine [-n N] [query]` | Earn credits by contributing to ash |
+| `ash status` | Show identity, balance, agent login |
+| `ash history [pubkey]` | Show earn/spend/mint events |
+| `ash peers` | List connected peers and balances |
+| `ash peers --forget <pubkey>` | Drop a stale ledger-key mapping (peer reset their corestore) |
+| `ash set <model>` | Set model tier (e.g., `claude-sonnet`) |
+| `ash set github-token <PAT>` | Save a GitHub PAT |
+| `ash login [agent]` | Log in to GitHub, Claude Code, or Codex |
+| `ash setup` | Re-run environment checks |
 
-Supports three providers:
-
-| Provider | Method |
-|----------|--------|
-| **GitHub** | Prompts for a personal access token (PAT) with `repo` scope. TUI `/login` uses OAuth Device Flow instead. |
-| **Claude Code** | Run `claude setup-token` to generate a long-lived `sk-ant-…` token |
-| **Codex** | Creates an isolated session at `~/.ash/codex-session` |
-
-You can also log in from within the TUI with `/login`.
-
-### As a requester — get AI coding work done
-
-```bash
-# Interactive chat mode (TUI)
-ash
-
-# Or submit a one-shot task
-ash run "add TypeScript types to my project"
-```
-
-Your code is packaged, encrypted, and announced to the P2P network. When a peer accepts:
-
-1. They claim the task atomically
-2. You send the AES key (via RSA-OAEP)
-3. They decrypt, run the AI agent, extract a git diff
-4. Diff is sent back encrypted
-5. You approve/reject; credits settle
-
-### As an acceptor — earn credits
-
-```bash
-# Serve up to 5 tasks (default model)
-ash serve -n 5
-
-# Serve indefinitely
-ash serve
-
-# Serve your own tasks too (local testing)
-ash serve --allow-self
-```
-
-When a task is available:
-1. Claim it atomically
-2. Receive the AES key
-3. Decrypt the code
-4. Run the AI agent in a sandbox
-5. Extract and send back the diff
-6. Receive settlement credits
-
-### Earn credits via GitHub contributions
-
-> **Note:** `ash mine` contributes to the [ash GitHub repository](https://github.com/Doheon/agent-share) itself. Improving ash earns you credits on the network.
-
-```bash
-# Auto-cycle: pick the highest-priority action and execute
-ash mine
-
-# Run up to N actions in one session
-ash mine -n 3
-
-# Query mode: file a GitHub issue if evidence is found in the codebase
-ash mine "the history command doesn't show mint events"
-```
-
-**Mine credit table:**
+### Mine credit table
 
 | Action | Credits |
 |--------|---------|
@@ -179,213 +121,181 @@ ash mine "the history command doesn't show mint events"
 | Review PR → request changes | 3 |
 | Review PR → close recommend | 2 |
 | Self-improve own PR | 4 |
-| Address reviewer feedback on own PR | 5 |
+| Address reviewer feedback | 5 |
 | File a new issue (query mode) | 4 |
 
-`/mine` is also available as a slash command inside the TUI.
+---
 
-### Check balance
+## ⚠️ v0.1 — experimental
 
-```bash
-ash status
+ash is pre-1.0. Protocol, ledger format, and identity layout may change between minor versions. **Don't run on production secrets, use a throwaway machine for `ash serve`, and back up `~/.ash/` if your credits matter.**
+
+- **Credits are admin-issued.** Every credit traces back to an `admin`-signed `MintEvent`. Loss/compromise of the admin keypair stops new issuance — no decentralized fallback in v0.1.
+- **DHT bootstrap is slow on cold starts** (30–90s for the first peer). Retry if balance verification fails the first time.
+- **`ash serve` is sandboxed; `ash mine` is NOT.** mine runs the AI agent directly on your host because it works on a clone of the public ash repo. Don't run mine on a machine with sensitive files.
+- **Network exposure.** Acceptors allow outbound HTTPS so the agent can reach `api.anthropic.com` / OpenAI. Cloud-metadata DNS (`169.254.169.254`, `host.docker.internal`, …) is mapped to loopback, but the bridge can't be fully firewalled from inside an unprivileged container. Don't run `ash serve` on cloud instances with broad IAM or sensitive LAN neighbours.
+- **Native deps.** `sodium-native`/`udx-native` need a C toolchain on platforms without prebuilt binaries (Alpine, some ARM Linux). `npm install` will tell you.
+- **Acceptors can read your code in plaintext inside the sandbox.** Don't submit company code or NDA-covered material.
+
+---
+
+## How it works
+
+ash is peer-to-peer, not a server. Identity is an Ed25519 keypair on disk; ledgers are append-only Hypercores replicated over Hyperswarm.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R as Requester
+    participant DHT as Hyperswarm DHT
+    participant A as Acceptor
+
+    R->>DHT: task:announce (encrypted blob)
+    DHT-->>A: task available
+    A->>R: task:claim (RSA pubkey, atomic)
+    R->>A: AES key (RSA-OAEP wrapped)
+    Note over A: decrypt code · run AI<br/>in Podman / Docker sandbox
+    A->>R: task:diff (AES-GCM)
+    R->>R: review diff
+    R->>A: spend:cosign (signed)
+    A->>R: task:settle approve
+    A->>R: earn:cosign (signed)
+    Note over R,A: ledger updated<br/>on both peers
 ```
 
-Shows your username, credit balance, pubkey, and login status for each AI agent.
+**Key properties:**
 
----
+- **End-to-end encrypted** — AES-256-GCM for code/diffs, RSA-OAEP for key exchange. AAD binds each ciphertext to `(task_id, requester_pubkey)`.
+- **Signed append-only logs** — every event is Ed25519-signed and lives in a per-user Hypercore at `~/.ash/corestore/`. Peers replicate each other's cores over a dedicated `LEDGER_TOPIC` to verify balances before accepting work.
+- **Atomic settlement** — credits move only after the diff arrives and both sides cross-sign. No double-spend, no half-state.
+- **Sandboxed acceptor** — `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `/tmp` as `tmpfs noexec,nosuid`, non-root user, agent token mounted read-only, cloud-metadata DNS mapped to loopback.
+- **Identity-bound earns** — earn events only credit when the counterparty has a valid admin-signed `MintEvent`. Throwaway-keypair forgery is rejected at replay.
+- **Channel-bound handshake** — every connection's Ed25519 challenge signs the Noise transport keys, so a relay/MITM can't proxy two sessions into one.
 
-## Commands
-
-| Command | Purpose |
-|---------|---------|
-| `ash init` | Create keypair, username, agent preference |
-| `ash` | Interactive chat mode (TUI) |
-| `ash run "<prompt>"` | Submit a one-shot task |
-| `ash serve [-n N]` | Accept tasks and earn credits |
-| `ash serve --allow-self` | Include your own tasks (testing) |
-| `ash status` | Show identity, balance, and agent login status |
-| `ash set <model>` | Set model tier (e.g., `claude-sonnet`) |
-| `ash set github-token <PAT>` | Save a GitHub personal access token |
-| `ash login [agent]` | Log in to GitHub, Claude Code, or Codex |
-| `ash setup` | Re-run environment checks |
-| `ash mine [-n N] [query]` | Earn credits via GitHub contributions |
-| `ash history [pubkey]` | Show earn/spend/mint event history |
-| `ash peers` | List connected peers and their balances |
-| `ash peers --forget <pubkey>` | Drop a stale ledger-key mapping (use after a peer resets their corestore) |
-
----
-
-## TUI slash commands
-
-Inside the interactive chat (`ash`):
-
-| Command | Purpose |
-|---------|---------|
-| `/serve [N]` | Enter serve mode — accept up to N tasks (omit for unlimited) |
-| `/mine [N]` or `/mine "<query>"` | Run mine actions or file a GitHub issue |
-| `/model [tier]` | Switch model interactively or directly |
-| `/new` | Clear turn history, start a fresh conversation |
-| `/status` | Show account info |
-| `/peers` | List connected peers |
-| `/history [pubkey]` | Show event history |
-| `/login [agent]` | Log in to GitHub, Claude Code, or Codex |
-| `/clear` | Clear chat scrollback |
-| `/help` | Show available commands |
-| `/quit` | Exit |
-
----
-
-## Policy
-
-Economic parameters live in [`shared/policy.ts`](shared/policy.ts) and are versioned
-with the package. Changing any value is a minor-release event.
-
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| `SIGNUP_BONUS` | `100` | Credits issued to each new user on request |
-| `FEE_BPS` | `0` | Platform fee in basis points (100 bps = 1%) |
-| `TREASURY_PUBKEY` | `ADMIN_PUBKEY` | Receives fees when `FEE_BPS > 0` |
-| `MODEL_CREDITS` | haiku 2 · sonnet 6 · opus 30 · codex 2 | Credit cost per task |
-
-### New user onboarding (automatic)
-
-Signup bonus is issued as an **admin-signed `MintEvent`**. The client-side
-`SIGNUP_BONUS` constant is only a reference value — replay only credits mints
-signed by `ADMIN_PUBKEY`, so forking the client and changing the number does
-not yield credit. Replay also caps each recipient at **one** `reason:
-"signup"` mint, so a buggy watcher cannot double-issue.
-
-Flow:
-
-1. `ash init` records a signed `SignupEvent` in the user's Hypercore.
-2. When the user joins the network (any of `ash`, `ash run`, `ash serve`,
-   `ash peers`), their peer:info reaches a coordinator that runs
-   `ash admin watch-signups`.
-3. The coordinator replicates the user's core, verifies the SignupEvent, and
-   appends a `MintEvent { reason: "signup", amount: SIGNUP_BONUS }` to its
-   own admin Hypercore.
-4. On the user's next `ash status`, the bonus is credited.
-
-If no coordinator is online when the user first joins, the SignupEvent stays
-pending in the user's core; it will be picked up the next time a coordinator
-and the user overlap on the network.
-
-A coordinator is any machine that runs:
-
-```bash
-ash admin watch-signups          # uses SIGNUP_BONUS from shared/policy.ts
-ash admin watch-signups --bonus 50   # override
-```
-
-The watcher requires the admin keypair at `~/.ash/keys/admin.ed25519`. The
-process stays up indefinitely and mints signup bonuses as new peers appear.
-
-### Forgery defense
-
-The balance replay at [`core/ledger/events.ts`](core/ledger/events.ts)
-enforces four invariants so credit can only enter the system through an
-admin mint or a real counterparty transaction:
-
+The forgery defense (`core/ledger/events.ts`) enforces:
 1. `SpendEvent` must be signed by the log owner.
 2. `EarnEvent` must be signed by `counterparty_pubkey`.
-3. Each `EarnEvent` must have a matching `SpendEvent` in the counterparty's
-   log — blocks the "fake counterparty keypair" forgery.
-4. Running balance must stay ≥ 0.
+3. Each `EarnEvent` requires a matching `SpendEvent` in the counterparty's log.
+4. Counterparty must hold at least one valid admin `MintEvent`.
 
 ---
 
-## Architecture
+## Architecture details
 
-### Identity and logs
+### Files on disk
 
-- **Keypair**: Ed25519 at `~/.ash/keys/identity.ed25519`
-- **Event log**: Per-user Hypercore in `~/.ash/corestore/` (append-only, Ed25519-signed, replicated over Hyperswarm)
-- **Config**: Username and model tier at `~/.ash/config.json`
+```
+~/.ash/
+├── config.json                    # username, pubkey, model tier, agent
+├── keys/
+│   ├── identity.ed25519           # Ed25519 ledger signing key
+│   ├── identity.ed25519.pub
+│   └── rsa/<pubkey>.pem           # RSA-OAEP per-task AES key exchange
+├── corestore/                     # Hypercore append-only event log
+├── codex-session/                 # Isolated Codex session (if used)
+└── peer_ledger_keys.json          # pubkey → ledger-core-key cache
+```
 
-Each event (task submission, credit earn, settlement) is signed by your keypair and appended to your Hypercore. Balance is derived by replaying the log. Peers replicate each other's cores over a dedicated `LEDGER_TOPIC` to verify balances before accepting tasks.
+Earlier builds stored RSA keys at `~/.agent-share/keys/`. ash migrates those on first run after upgrade.
 
 ### Peer discovery
 
-Uses **Hyperswarm** (DHT-based). Fixed topic: `sha256("ash-network-v1")`. Peers announce themselves and listen for tasks.
-
-### Encryption
-
-- **Code → acceptor**: AES-256-GCM (random IV per task)
-- **AES key exchange**: RSA-OAEP (acceptor's public key)
-- **Integrity**: HMAC-SHA256 on all messages
+Hyperswarm DHT, fixed topic `sha256("ash-network-v1")`. Peers join, announce, exchange `peer:hello` (Ed25519 challenge bound to Noise transport keys + protocol version), then talk task-scoped messages.
 
 ### Sandbox
 
-Acceptors run AI agents in a rootless Podman or Docker container with:
-- `--cap-drop=ALL` (no capabilities)
+Acceptors run AI agents in a Podman or Docker container:
+
+- `--cap-drop=ALL`
 - `--security-opt=no-new-privileges`
 - `--tmpfs /tmp:rw,noexec,nosuid,size=100m`
-- non-root `sandboxuser` inside the container
-- the agent token mounted read-only at `/run/secrets/agent-token`
-- `--add-host` entries mapping cloud-metadata DNS names to `127.0.0.1`
+- non-root `sandboxuser`
+- agent token mounted read-only at `/run/secrets/agent-token`
+- `--add-host` entries map cloud-metadata DNS names to `127.0.0.1`
+
+### Policy
+
+Economic parameters live in [`shared/policy.ts`](shared/policy.ts).
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `SIGNUP_BONUS` | 100 | Admin-signed `MintEvent` issued to each new user |
+| `FEE_BPS` | 0 | Platform fee (basis points; 100 = 1%) |
+| `MODEL_CREDITS` | haiku 2 · sonnet 6 · opus 30 · codex 2 | Cost per task |
+
+Signup bonus flow:
+1. `ash init` records a signed `SignupEvent` on your Hypercore.
+2. The next time you join the network while a coordinator (`ash admin watch-signups`) is online, the coordinator verifies the signup and appends a `MintEvent { reason: "signup", amount: 100 }` to its admin Hypercore.
+3. Your next `ash status` shows the credit. Replay caps each recipient at one signup mint, so a buggy watcher can't double-issue.
+
+A coordinator runs:
+
+```bash
+ash admin watch-signups
+ash admin watch-signups --bonus 50  # override
+```
+
+The watcher requires the admin keypair at `~/.ash/keys/admin.ed25519`.
 
 ---
 
 ## Troubleshooting
 
 ### `not initialized`
-
 Run `ash init` first.
 
-### Task not claiming
-
-Check that:
-- At least one peer is running `ash serve`
-- Network connectivity (Hyperswarm DHT access)
-- Firewall allows UTP/UDP
-
-### Balance not updating
-
-1. Check event history: `ash history`
-2. Ensure the acceptor completed the task (no errors in sandbox)
-3. Settlement is atomic — if claim failed, credits aren't issued
-
-### Agent login expired
-
-Run `ash login` or `/login` inside the TUI to refresh credentials.
+### Task never claims
+- Confirm at least one peer is running `ash serve`
+- DHT bootstrap can take 30–90s on a cold start; retry
+- Firewall must allow UTP/UDP
 
 ### Verbose handshake logs
 
-If peers don't connect or get destroyed silently, run with debug logs:
-
+If peers disconnect silently:
 ```bash
 ASH_DEBUG_SWARM=1 ash
 ```
 
-This prints handshake timeouts, signature failures, and protocol-version mismatches to stderr.
-
 ### Wire protocol incompatibility
+v0.1.0 ships protocol version 2. Versions must match exactly — no compatibility window with earlier builds.
 
-Every peer carries `protocol_version` in `peer:hello`. Versions must match exactly — there is no compatibility window. v0.1.0 ships protocol version 2; do not mix it with any earlier internal builds.
+### Balance not updating
+1. Check `ash history` to see whether the earn/spend was recorded
+2. Cross-machine balance verification needs the admin core to replicate; a fresh acceptor's first earn may show `0` until replication catches up — retry `ash status`
+3. If a peer reset their corestore, run `ash peers --forget <pubkey>` to clear the stale mapping
+
+### Agent login expired
+Run `ash login` (or `/login` inside the TUI).
 
 ### Podman errors
-
-If `ash serve` fails:
-
 ```bash
-# Check Podman
 podman run --rm alpine echo "ok"
-
-# Fallback to Docker
+# or fall back to Docker:
 export ASH_PODMAN_CMD=docker
 ash serve
 ```
 
+### Corestore locked
+Another `ash` process is already running. Stop it, or if a previous run was killed unexpectedly, the lock cleans up on next start.
+
 ---
+
+## Install from source
+
+```bash
+git clone https://github.com/Doheon/agent-share
+cd agent-share
+npm install
+npm install -g .
+ash init
+```
 
 ## Development
 
-Clone and run locally:
-
 ```bash
-npm run dev                 # Run CLI with tsx
-npm run test                # Run tests
-npm run build               # Build distributable tarball
+npm run dev    # run CLI with tsx
+npm test       # run vitest
+npm run build  # build distributable tarball (npm pack)
 ```
 
 ---
