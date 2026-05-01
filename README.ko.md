@@ -257,7 +257,7 @@ ASH_DEBUG_SWARM=1 ash
 ```
 
 ### 와이어 프로토콜 비호환
-v0.1.0은 protocol version 2를 사용합니다. 버전이 정확히 일치해야 함 — 이전 빌드와 호환 구간 없음.
+v0.1.0은 protocol version 1을 사용합니다. 버전이 정확히 일치해야 함 — 이 숫자가 올라가면 모든 피어가 함께 업그레이드해야 합니다.
 
 ### 잔액이 갱신되지 않음
 1. `ash history`로 earn/spend가 기록됐는지 확인

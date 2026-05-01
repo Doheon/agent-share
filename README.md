@@ -257,7 +257,7 @@ ASH_DEBUG_SWARM=1 ash
 ```
 
 ### Wire protocol incompatibility
-v0.1.0 ships protocol version 2. Versions must match exactly — no compatibility window with earlier builds.
+v0.1.0 ships protocol version 1. Versions must match exactly — when this number bumps, every peer needs to upgrade together.
 
 ### Balance not updating
 1. Check `ash history` to see whether the earn/spend was recorded
