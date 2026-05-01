@@ -144,6 +144,31 @@ interface ChatProps {
 let _idCounter = 0;
 const nextId = () => ++_idCounter;
 
+// Shown while Hyperswarm bootstraps. On a cold start (no DHT cache) the
+// first peer can take 30–90s to discover; without something on screen the
+// user assumes ash hung and Ctrl+Cs out.
+function ConnectingBanner(): React.ReactElement {
+  const [dots, setDots] = useState(".");
+  const [secs, setSecs] = useState(0);
+  useEffect(() => {
+    const dotTimer = setInterval(
+      () => setDots((d) => (d.length >= 3 ? "." : d + ".")),
+      400,
+    );
+    const secTimer = setInterval(() => setSecs((s) => s + 1), 1000);
+    return () => {
+      clearInterval(dotTimer);
+      clearInterval(secTimer);
+    };
+  }, []);
+  return (
+    <Box flexDirection="column" paddingY={1} paddingX={2}>
+      <Text color="#88ff88">  joining ash network{dots}  </Text>
+      <Text dimColor>  cold start can take 30–90s · {secs}s elapsed · ctrl+c to abort</Text>
+    </Box>
+  );
+}
+
 function ChatApp({
   userId, username, edPriv, models, initialModel, initialBalance, initialServed, swarm, absDir,
 }: ChatProps) {
@@ -1429,32 +1454,46 @@ export async function runChat(opts: { model?: string } = {}): Promise<void> {
   const initialServed = (await getEvents(userId)).filter((e) => e.type === "earn").length;
 
   const swarm = new AshSwarm();
+  // Render a banner WHILE swarm.join runs. exitOnCtrlC=true so the user
+  // can abort a stuck cold-start without leaving the terminal hostile.
+  const banner = render(<ConnectingBanner />, { exitOnCtrlC: true });
+  let joinError: Error | null = null;
   try {
     await swarm.join(edPriv, userId);
   } catch (err) {
-    const msg = (err as Error).message ?? "";
-    if (msg.includes("could not be locked") || msg.includes("lock")) {
-      console.error("\n  Another ash process is already running.\n  Stop it first, then run ash again.\n");
-    } else {
-      console.error(`\n  Failed to join network: ${msg}\n`);
-    }
-    await exitWithCleanup(1);
+    joinError = err as Error;
   }
 
   // Attach Corestore replication on the ledger topic so this node's event
   // Hypercore is available to serve peers for balance verification.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let repSwarm: any = null;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { default: Hyperswarm } = (await import("hyperswarm")) as any;
-    repSwarm = new Hyperswarm();
-    const store = await getCorestore();
-    repSwarm.join(LEDGER_TOPIC);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    repSwarm.on("connection", (conn: any) => store.replicate(conn));
-  } catch (err) {
-    console.error("[ash] ledger replication swarm failed to start:", (err as Error).message);
+  if (!joinError) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { default: Hyperswarm } = (await import("hyperswarm")) as any;
+      repSwarm = new Hyperswarm();
+      const store = await getCorestore();
+      repSwarm.join(LEDGER_TOPIC);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      repSwarm.on("connection", (conn: any) => store.replicate(conn));
+    } catch (err) {
+      // Non-fatal — surface after the banner unmounts so it isn't
+      // overwritten by the ChatApp render below.
+      console.error("[ash] ledger replication swarm failed to start:", (err as Error).message);
+    }
+  }
+
+  banner.unmount();
+
+  if (joinError) {
+    const msg = joinError.message ?? "";
+    if (msg.includes("could not be locked") || msg.includes("lock")) {
+      console.error("\n  Another ash process is already running.\n  Stop it first, then run ash again.\n");
+    } else {
+      console.error(`\n  Failed to join network: ${msg}\n`);
+    }
+    await exitWithCleanup(1);
   }
 
   const { waitUntilExit } = render(
