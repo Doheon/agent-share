@@ -1388,6 +1388,12 @@ export async function runChat(opts: { model?: string } = {}): Promise<void> {
     console.error("\n  ash requires an interactive terminal (TTY).\n  Run 'ash' directly in your terminal, not via a pipe.\n");
     process.exit(1);
   }
+  // ink bundles a dev build of react-reconciler that calls performance.measure()
+  // on every render without ever calling clearMeasures(). Long chat sessions
+  // would hit Node's 1M-entry buffer cap and emit MaxPerformanceEntryBufferExceededWarning.
+  const { performance } = await import("node:perf_hooks");
+  setInterval(() => performance.clearMeasures(), 60_000).unref();
+
   const absDir = process.cwd();
   const cfg = await loadConfig();
   if (!cfg.pubkey || !cfg.username) {

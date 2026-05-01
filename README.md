@@ -9,6 +9,8 @@
 
 Claude Code's $20 plan caps you at a **5-hour session**. The next tier is $100/month. Most days you don't need AI all day — **ash** lets you earn credits during idle hours, then spend them when you actually need to ship.
 
+ash is a TUI. Install it, launch it, do everything from one screen.
+
 ---
 
 ## Getting started
@@ -24,17 +26,17 @@ ash init
 - pick a username
 - choose Claude Code or Codex as your agent
 - log in to your AI provider (creates a long-lived sandbox token)
-- check Podman / Docker is available (required for `ash serve`)
+- check Podman / Docker is available (required for serving)
 
 State lives at `~/.ash/`. **Requires Node 18+, git, Podman or Docker.**
 
-### 2. Try it — interactive chat
+### 2. Launch the TUI
 
 ```bash
 ash
 ```
 
-Drops you into a TUI. Type a prompt; the network finds a peer to run it; the diff is shown; you choose to apply or skip. **You're using credits earned by another peer.**
+Drops you into an interactive screen. Type a prompt; the network finds a peer to run it; the diff is shown; you choose to apply or skip. **You're using credits earned by another peer.**
 
 ```text
 ❯ refactor cli/main.ts to lazy-import command handlers
@@ -44,61 +46,52 @@ Drops you into a TUI. Type a prompt; the network finds a peer to run it; the dif
   ⎿ Apply? (y=6cr · n=3cr · 60s = 3cr)
 ```
 
-### 3. Earn credits — accept tasks
+---
 
-On a machine you don't mind sharing CPU with (use a separate one if you can):
+## Inside the TUI
 
-```bash
-ash serve              # accept indefinitely
-ash serve -n 5         # accept up to 5 tasks then exit
-```
+Everything is a slash command. Type `/help` for the full list.
 
-The acceptor downloads the requester's encrypted code, runs your AI agent in a Podman/Docker sandbox, and ships back the diff. **Credits land in your local ledger atomically when the requester applies the diff.**
+| Slash command | What it does |
+|---------------|--------------|
+| *(just type a prompt)* | Submit a task to the network and spend credits |
+| `/serve [-n N]` | Earn credits by accepting other peers' tasks |
+| `/mine [-n N] [query]` | Earn credits by contributing to the ash repo |
+| `/status` | Show username, balance, pubkey, agent login state |
+| `/history [pubkey]` | Show full earn / spend / mint event log |
+| `/peers` | List online peers and their balances |
+| `/model <tier>` | Switch model (haiku / sonnet / opus / codex) |
+| `/login [agent]` | Log in to GitHub, Claude Code, or Codex |
+| `/help` | Show all commands |
+| `/quit` | Exit the TUI |
 
-### 4. Earn credits — mine on the ash repo
+### Two ways to earn
 
-```bash
-ash mine               # auto-cycle one task
-ash mine -n 3          # up to 3 tasks
-ash mine "history command misses mint events"  # file an issue with code evidence
-```
+**`/serve`** — accept incoming tasks. Your machine downloads the requester's encrypted code, runs your AI agent in a Podman/Docker sandbox, and ships back the diff. Credits land in your local ledger atomically when the requester applies it.
 
-mine pays you for contributing to ash itself: implementing issues, reviewing PRs, filing well-evidenced bug reports.
+**`/mine`** — contribute to the ash repo itself. mine runs against the public ash codebase: implement open issues, review PRs, file well-evidenced bug reports.
 
-### 5. Check your balance anytime
-
-```bash
-ash status             # username · balance · pubkey · agent login state
-ash history            # full earn/spend/mint event log
-ash peers              # who's online and their balances
-```
+| Mine action | Credits |
+|-------------|---------|
+| Implement issue → open PR | 6 (+3 if tests added) |
+| Recommend closing issue | 2 |
+| Review PR → approve | 2 |
+| Review PR → request changes | 3 |
+| Review PR → close recommend | 2 |
+| Self-improve own PR | 4 |
+| Address reviewer feedback | 5 |
+| File a new issue (query mode) | 4 |
 
 ---
 
-## What you can do
+## Without the TUI
 
-| Goal | Command |
-|------|---------|
-| Run an AI prompt against your current project | `ash` (TUI) or `ash run "<prompt>"` |
-| Earn credits by serving tasks | `ash serve` |
-| Earn credits by improving the ash repo | `ash mine` |
-| File a bug report with verified evidence | `ash mine "<query>"` |
-| Switch model (haiku / sonnet / opus / codex) | `ash set <tier>` |
-| See your identity and balance | `ash status` |
-| Browse your event log | `ash history` |
-| List online peers | `ash peers` |
-
-Inside the TUI, every command is a slash command (`/serve`, `/mine`, `/model`, `/status`, `/history`, `/peers`, `/login`, `/help`, `/quit`).
-
----
-
-## Commands reference
+For scripts, cron jobs, and CI, every TUI action has a CLI equivalent.
 
 | Command | Purpose |
 |---------|---------|
 | `ash init` | First-time setup (keypair, username, agent) |
-| `ash` | Interactive chat (TUI) |
-| `ash run "<prompt>"` | One-shot prompt without TUI |
+| `ash run "<prompt>"` | One-shot prompt without launching the TUI |
 | `ash serve [-n N]` | Accept tasks and earn credits |
 | `ash serve --allow-self` | Include your own tasks (testing) |
 | `ash mine [-n N] [query]` | Earn credits by contributing to ash |
@@ -110,19 +103,6 @@ Inside the TUI, every command is a slash command (`/serve`, `/mine`, `/model`, `
 | `ash set github-token <PAT>` | Save a GitHub PAT |
 | `ash login [agent]` | Log in to GitHub, Claude Code, or Codex |
 | `ash setup` | Re-run environment checks |
-
-### Mine credit table
-
-| Action | Credits |
-|--------|---------|
-| Implement issue → open PR | 6 (+3 if tests added) |
-| Recommend closing issue | 2 |
-| Review PR → approve | 2 |
-| Review PR → request changes | 3 |
-| Review PR → close recommend | 2 |
-| Self-improve own PR | 4 |
-| Address reviewer feedback | 5 |
-| File a new issue (query mode) | 4 |
 
 ---
 
@@ -145,22 +125,13 @@ ash is peer-to-peer, not a server. Identity is an Ed25519 keypair on disk; ledge
 
 ```mermaid
 sequenceDiagram
-    autonumber
     participant R as Requester
-    participant DHT as Hyperswarm DHT
     participant A as Acceptor
-
-    R->>DHT: task:announce (encrypted blob)
-    DHT-->>A: task available
-    A->>R: task:claim (RSA pubkey, atomic)
-    R->>A: AES key (RSA-OAEP wrapped)
-    Note over A: decrypt code · run AI<br/>in Podman / Docker sandbox
-    A->>R: task:diff (AES-GCM)
-    R->>R: review diff
-    R->>A: spend:cosign (signed)
-    A->>R: task:settle approve
-    A->>R: earn:cosign (signed)
-    Note over R,A: ledger updated<br/>on both peers
+    R->>A: encrypted task
+    Note over A: run AI in<br/>Podman / Docker sandbox
+    A->>R: signed diff
+    R->>A: cosign (spend & earn)
+    Note over R,A: both ledgers updated
 ```
 
 **Key properties:**
