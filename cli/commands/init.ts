@@ -39,19 +39,28 @@ import {
 import { getEvents } from "../../core/ledger/events.ts";
 
 
-const AGENT_INFO: Record<AgentType, { name: string; credDir: string; installHint: string; loginCmd: string; statusCmd: string[] }> = {
+const AGENT_INFO: Record<AgentType, { name: string; credDir: string; installHint: string; loginCmd: string; loginHint: string; statusCmd: string[] }> = {
   claude: {
     name: "Claude Code",
     credDir: `${homedir()}/.claude`,
     installHint: "npm install -g @anthropic-ai/claude-code",
-    loginCmd: "claude auth login",
-    statusCmd: ["claude", "auth", "status"],
+    // `claude auth login` does not exist in modern Claude Code (1.x) —
+    // login happens inside the REPL via /login or via `claude setup-token`
+    // for the long-lived OAuth token used by ash. setup-token is what
+    // refreshAgentCredentials() invokes; running it here gives the user a
+    // working interactive flow if they hit the fallback path.
+    loginCmd: "claude setup-token",
+    loginHint: "ash login claude",
+    // Claude Code has no `claude auth status` subcommand. Probe the binary
+    // itself; the credDir fallback below is the real signal.
+    statusCmd: ["claude", "--version"],
   },
   codex: {
     name: "Codex",
     credDir: `${homedir()}/.codex`,
     installHint: "npm install -g @openai/codex",
     loginCmd: "codex login",
+    loginHint: "ash login codex",
     statusCmd: ["codex", "login", "status"],
   },
 };
@@ -131,19 +140,19 @@ export async function ensureAgentLoggedIn(agent: AgentType): Promise<void> {
   if (await isAgentLoggedIn(agent)) return;
 
   if (!process.stdin.isTTY) {
-    console.error(`\nerror: ${info.name} is not logged in. Run: ${info.loginCmd}\n`);
+    console.error(`\nerror: ${info.name} is not logged in. Run: ${info.loginHint}\n`);
     process.exit(2);
   }
   const yn = await confirm({ message: `${info.name} is not logged in. Log in now?`, default: false });
   if (!yn) {
-    console.error(`\nerror: Login required. Run: ${info.loginCmd}\n`);
+    console.error(`\nerror: Login required. Run: ${info.loginHint}\n`);
     process.exit(2);
   }
   const [cmd, ...args] = info.loginCmd.split(" ");
   const proc = spawn([cmd!, ...args], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
   await proc.exited;
   if (!(await isAgentLoggedIn(agent))) {
-    console.error(`\nerror: Login failed. Please run: ${info.loginCmd}\n`);
+    console.error(`\nerror: Login failed. Please run: ${info.loginHint}\n`);
     process.exit(1);
   }
 }

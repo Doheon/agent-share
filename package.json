@@ -24,6 +24,7 @@
     "tsconfig.json",
     "README.md",
     "README.ko.md",
+    "SECURITY.md",
     "LICENSE",
     "!**/*_test.ts",
     "!**/*.test.ts",

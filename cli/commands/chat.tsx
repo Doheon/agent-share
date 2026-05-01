@@ -34,16 +34,20 @@ import {
 } from "../../shared/events.ts";
 import {
   appendLocalEvent,
+  appendNextEvent,
   closeLocalStore,
   getLedgerCoreKey,
   getLocalBalance,
   getNextNonce,
+  getSpendableBalance,
+  releasePendingSpend,
+  reservePendingSpend,
 } from "../p2p_state.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
 import { getEvents, getAdminMintsFor } from "../../core/ledger/events.ts";
 import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
 import { LEDGER_TOPIC } from "../../shared/constants.ts";
-import { splitFee } from "../../shared/policy.ts";
+import { splitFee, resolveTier } from "../../shared/policy.ts";
 import { AshSwarm, type SwarmPeer } from "../../core/p2p/swarm.ts";
 import type { P2PMessage } from "../../core/p2p/messages.ts";
 import { sanitizeLogLine } from "../../core/p2p/messages.ts";
@@ -973,16 +977,20 @@ function ChatApp({
           addMsg("  ⎿ cannot change model while serving (esc to stop first)", "#e3bd5a");
           break;
         }
-        const tierArg = args[0]?.toLowerCase();
+        const tierArg = args[0];
         if (!tierArg) {
           setPickerActive(true);
           setPickerIdx(Math.max(0, models.findIndex((m) => m.tier === currentModelRef.current)));
         } else {
-          const found = models.find((m) => m.tier === tierArg);
+          // Accept short aliases ("haiku") as well as canonical tiers
+          // ("claude-haiku") so the slash command matches what users
+          // naturally type and what the README documents.
+          const canonical = resolveTier(tierArg);
+          const found = canonical ? models.find((m) => m.tier === canonical) : undefined;
           if (!found) addMsg(`Unknown model: ${tierArg}`, "#ff8888");
           else {
-            setCurrentModelState(tierArg);
-            await saveModelTier(tierArg);
+            setCurrentModelState(found.tier);
+            await saveModelTier(found.tier);
             addMsg(`Model: ${found.display_name}  (${found.credits}cr/task)`, "#88ff88");
           }
         }
@@ -1410,6 +1418,13 @@ export async function runChat(opts: { model?: string } = {}): Promise<void> {
   let initialModel = opts.model ?? await loadModelTier();
   if (!models.find((m) => m.tier === initialModel)) initialModel = DEFAULT_MODEL_TIER;
 
+  // From here on, the corestore is open. Any abort path must release the
+  // lock so the next `ash` invocation isn't told the store is "locked".
+  const exitWithCleanup = async (code: number): Promise<never> => {
+    await closeLocalStore().catch(() => undefined);
+    process.exit(code);
+  };
+
   const initialBalance = (await getLocalBalance(userId)).balance;
   const initialServed = (await getEvents(userId)).filter((e) => e.type === "earn").length;
 
@@ -1423,7 +1438,7 @@ export async function runChat(opts: { model?: string } = {}): Promise<void> {
     } else {
       console.error(`\n  Failed to join network: ${msg}\n`);
     }
-    process.exit(1);
+    await exitWithCleanup(1);
   }
 
   // Attach Corestore replication on the ledger topic so this node's event

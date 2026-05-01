@@ -101,8 +101,20 @@ export class AshSwarm {
     // before our `connection` event fires. If for some reason the local
     // key is missing we refuse the connection rather than silently
     // degrading the binding to nonce-only.
-    if (!conn.publicKey) {
-      console.error(`[swarm] missing local transport key on connection — closing`);
+    // We rely on `conn.publicKey` and `conn.remotePublicKey` from
+    // `@hyperswarm/secret-stream`. If the upstream library ever renames or
+    // changes the type of these fields, the channel-binding payload below
+    // would silently degrade (string "undefined", or local === remote)
+    // and a relay/MITM could replay one session into another. Refuse to
+    // proceed unless both keys are 32-byte buffers and distinct.
+    if (
+      !Buffer.isBuffer(conn.publicKey) ||
+      !Buffer.isBuffer(conn.remotePublicKey) ||
+      conn.publicKey.length !== 32 ||
+      conn.remotePublicKey.length !== 32 ||
+      conn.publicKey.equals(conn.remotePublicKey)
+    ) {
+      console.error(`[swarm] invalid Noise transport keys on connection — closing`);
       try { conn.destroy(); } catch { /* ignore */ }
       return;
     }

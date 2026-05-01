@@ -11,6 +11,7 @@ import { loadModels, saveModelTier, saveConfig } from "../client.ts";
 import { ensureAgentLoggedIn } from "./init.ts";
 import { ensureInitialized, NotInitializedError } from "../guard.ts";
 import { modelToAgent } from "../../shared/types.ts";
+import { resolveTier } from "../../shared/policy.ts";
 import { fetchCurrentUser } from "../../core/github/client.ts";
 
 async function setGithubToken(token?: string): Promise<void> {
@@ -51,14 +52,15 @@ export const setCommand = new Command("set")
     }
 
     const models = await loadModels();
-    const found = models.find((m) => m.tier === key);
+    const canonical = resolveTier(key);
+    const found = canonical ? models.find((m) => m.tier === canonical) : undefined;
     if (!found) {
       const tiers = models.map((m) => m.tier).join(", ");
       console.error(`\nerror: unknown key "${key}". Use a model tier (${tiers}) or 'github-token'\n`);
       process.exit(2);
     }
 
-    await ensureAgentLoggedIn(modelToAgent(key));
-    await saveModelTier(key);
-    console.log(`\n  model: ${key}\n`);
+    await ensureAgentLoggedIn(modelToAgent(found.tier));
+    await saveModelTier(found.tier);
+    console.log(`\n  model: ${found.tier}\n`);
   });

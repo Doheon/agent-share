@@ -111,9 +111,11 @@ For scripts, cron jobs, and CI, every TUI action has a CLI equivalent.
 ash is pre-1.0. Protocol, ledger format, and identity layout may change between minor versions. **Don't run on production secrets, use a throwaway machine for `ash serve`, and back up `~/.ash/` if your credits matter.**
 
 - **Credits are admin-issued.** Every credit traces back to an `admin`-signed `MintEvent`. Loss/compromise of the admin keypair stops new issuance — no decentralized fallback in v0.1.
+- **Signup auto-mint runs only during the launch window.** `ash admin watch-signups` issues `SIGNUP_BONUS` to any pubkey that broadcasts a self-signed `SignupEvent` — no GitHub binding, no per-IP rate limit. The admin can stop the watcher at any time; it is intended only for the bootstrap period.
 - **DHT bootstrap is slow on cold starts** (30–90s for the first peer). Retry if balance verification fails the first time.
-- **`ash serve` is sandboxed; `ash mine` is NOT.** mine runs the AI agent directly on your host because it works on a clone of the public ash repo. Don't run mine on a machine with sensitive files.
-- **Network exposure.** Acceptors allow outbound HTTPS so the agent can reach `api.anthropic.com` / OpenAI. Cloud-metadata DNS (`169.254.169.254`, `host.docker.internal`, …) is mapped to loopback, but the bridge can't be fully firewalled from inside an unprivileged container. Don't run `ash serve` on cloud instances with broad IAM or sensitive LAN neighbours.
+- **`ash serve` is sandboxed; `ash mine` is NOT.** mine runs the AI agent directly on your host with `--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`. A prompt-injection in a malicious PR or issue body could read or modify any file you can. The first `ash mine` invocation prints a confirmation prompt and writes a sentinel file (`~/.ash/.mine_warning_seen`).
+- **Sandbox network exposure.** `serve` runs the agent in Podman or Docker with `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--tmpfs /tmp:noexec,nosuid`, non-root user, and agent token read-only. Each agent gets only its provider host whitelisted: claude → `api.anthropic.com`; codex → `api.openai.com`, `chatgpt.com`. Cloud-metadata names (`169.254.169.254`, `host.docker.internal`, …) are mapped to loopback. **On Docker (default on macOS/Windows), the bridge network can still reach the host LAN and IP-only metadata endpoints.** Rootless Podman on Linux is recommended for `serve`. `serve` prints a runtime warning when Docker is used.
+- **Crash between spend and earn-cosign loses one task's credit.** If a requester crashes after their `SpendEvent` is appended locally but before `earn:cosign` reaches the acceptor, the acceptor's work goes uncompensated for that task. v0.1 documents this; v0.2 will add a 3-message commit.
 - **Native deps.** `sodium-native`/`udx-native` need a C toolchain on platforms without prebuilt binaries (Alpine, some ARM Linux). `npm install` will tell you.
 - **Acceptors can read your code in plaintext inside the sandbox.** Don't submit company code or NDA-covered material.
 
@@ -241,10 +243,8 @@ Run `ash login` (or `/login` inside the TUI).
 ### Podman errors
 ```bash
 podman run --rm alpine echo "ok"
-# or fall back to Docker:
-export ASH_PODMAN_CMD=docker
-ash serve
 ```
+If Podman is broken or unavailable, re-run `ash setup` and pick Docker. Note that Docker's bridge network exposes the host LAN (see "Sandbox network exposure" above).
 
 ### Corestore locked
 Another `ash` process is already running. Stop it, or if a previous run was killed unexpectedly, the lock cleans up on next start.

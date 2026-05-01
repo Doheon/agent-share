@@ -54,6 +54,24 @@ export const MODEL_CREDITS: Record<string, number> = Object.fromEntries(
 );
 
 /**
+ * Short aliases users naturally type ("haiku" instead of "claude-haiku").
+ * Looked up case-insensitively. Codex maps to itself.
+ */
+const TIER_ALIASES: Record<string, string> = {
+  haiku: "claude-haiku",
+  sonnet: "claude-sonnet",
+  opus: "claude-opus",
+  codex: "codex",
+};
+
+/** Returns the canonical tier for an input (alias or full name) or null. */
+export function resolveTier(input: string): string | null {
+  const lc = input.trim().toLowerCase();
+  if (MODELS.some((m) => m.tier === lc)) return lc;
+  return TIER_ALIASES[lc] ?? null;
+}
+
+/**
  * Splits a gross credit charge into the acceptor's net earn and the treasury fee.
  * Acceptor-favoring rounding: treasury uses floor(), so small tasks round toward
  * paying the worker rather than the treasury.

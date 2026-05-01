@@ -66,6 +66,41 @@ export async function appendLocalEvent(pubkey: string, event: Event): Promise<vo
   return appendEvent(pubkey, event);
 }
 
+// Per-pubkey async mutex. Without it, two flows in the same process
+// (e.g. /mine running while a /serve task completes, or chat + mine
+// racing inside the TUI) can both call getNextNonce → both see the same
+// length N → both build events with nonce=N → both append. The on-wire
+// log holds two entries at offsets N and N+1 sharing the same nonce;
+// replayBalance dedupes spends by nonce so one of them silently drops
+// from the user's balance, while earns dedupe by task_id and so both
+// land — net effect: exploitable balance inflation. The cross-process
+// path is already covered by the corestore lock.
+const appendLockByPubkey = new Map<string, Promise<unknown>>();
+
+/**
+ * Atomic "compute next nonce → build event → append" sequence for a
+ * single pubkey. Use this whenever an event's nonce comes from
+ * getNextNonce(myPub) — it eliminates the read-then-write race that
+ * lets concurrent flows assign the same nonce to different events.
+ */
+export async function appendNextEvent(
+  pubkey: string,
+  build: (nonce: number) => Event | Promise<Event>,
+): Promise<void> {
+  const prev = appendLockByPubkey.get(pubkey) ?? Promise.resolve();
+  const work = prev
+    .catch(() => undefined) // a prior caller's failure must not block ours
+    .then(async () => {
+      const nonce = await getEventCount(pubkey);
+      const event = await build(nonce);
+      await appendEvent(pubkey, event);
+    });
+  // Chain the next caller behind us; swallow rejection on the chain side
+  // so it doesn't bubble to whoever lands here next.
+  appendLockByPubkey.set(pubkey, work.catch(() => undefined));
+  return work;
+}
+
 /** Returns the hex key of the given owner's event Hypercore (for peer announcements). */
 export async function getLedgerCoreKey(pubkey: string): Promise<string> {
   return getCoreKey(pubkey);

@@ -41,6 +41,10 @@ export function isValidMessage(raw: any): boolean {
   if (raw.type === "task:announce") {
     if (typeof raw.blob_size !== "number" || !Number.isFinite(raw.blob_size)) return false;
     if (raw.blob_size < 0 || raw.blob_size > MAX_BLOB_SIZE) return false;
+    // Cap the prompt — without this, an adversarial requester can ship a
+    // multi-MB string in a single message and OOM the acceptor before any
+    // of the per-task validation gates run.
+    if (typeof raw.prompt !== "string" || raw.prompt.length > 8192) return false;
   }
   if (raw.type === "task:blob") {
     if (typeof raw.data !== "string" || raw.data.length > MAX_BLOB_SIZE_B64) return false;

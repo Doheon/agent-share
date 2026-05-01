@@ -101,16 +101,23 @@ export const peersCommand = new Command("peers")
     }
 
     console.log(`  Found ${discovered.size} peer(s):\n`);
-    for (const [pubkey, info] of discovered) {
-      let balStr = "  ?  ";
-      if (info.ledgerKey) {
-        try {
-          const bal = await getRemotePeerBalance(info.ledgerKey, pubkey);
-          balStr = `${String(bal).padStart(4)} cr`;
-        } catch { /* ignore */ }
-      }
-      const model = info.model ?? "unknown";
-      console.log(`  ${pubkey.slice(0, 16)}…  ${balStr}  ${model}`);
+    // Fetch balances in parallel — each lookup waits up to 8s for
+    // replication, so doing them serially turns a handful of peers into
+    // a minute-long pause for the user.
+    const entries = await Promise.all(
+      Array.from(discovered.entries()).map(async ([pubkey, info]) => {
+        let balStr = "  ?  ";
+        if (info.ledgerKey) {
+          try {
+            const bal = await getRemotePeerBalance(info.ledgerKey, pubkey);
+            balStr = `${String(bal).padStart(4)} cr`;
+          } catch { /* ignore */ }
+        }
+        return { pubkey, balStr, model: info.model ?? "unknown" };
+      }),
+    );
+    for (const e of entries) {
+      console.log(`  ${e.pubkey.slice(0, 16)}…  ${e.balStr}  ${e.model}`);
     }
     console.log();
 

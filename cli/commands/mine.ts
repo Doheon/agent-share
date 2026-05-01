@@ -20,7 +20,8 @@
 
 import { Command } from "commander";
 import { input, confirm as inquirerConfirm } from "@inquirer/prompts";
-import { mkdtemp, rm, access } from "node:fs/promises";
+import { mkdtemp, rm, access, stat, writeFile } from "node:fs/promises";
+import { ASH_DIR } from "../ash_dir.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -28,7 +29,7 @@ import { writeSync } from "node:fs";
 
 import { loadConfig, loadIdentity, loadAgent, saveConfig } from "../client.ts";
 import type { AgentType } from "../../shared/types.ts";
-import { appendLocalEvent, closeLocalStore, getNextNonce } from "../p2p_state.ts";
+import { appendNextEvent, closeLocalStore, getNextNonce } from "../p2p_state.ts";
 import { ensureInitialized, NotInitializedError } from "../guard.ts";
 import { signEd25519, verifyEd25519, rawHexToPublicKey } from "../../core/crypto/ed25519.ts";
 import { canonicalStringify } from "../../shared/canonical.ts";
@@ -639,24 +640,24 @@ async function earnCredits(opts: {
     return;
   }
 
-  // Read nonce immediately before signing+appending. This collapses the
-  // window where two parallel flows could compute the same value.
-  const appendNonce = await getNextNonce(myPub);
-  const partial: Omit<EarnEvent, "signature"> = {
-    type: "earn",
-    nonce: appendNonce,
-    timestamp: new Date().toISOString(),
-    amount,
-    task_id: taskId,
-    counterparty_pubkey: claim.cosignerPubkey,
-    counterparty_task_signature: claim.cosignerTaskSignature,
-  };
-  const earnEvent: EarnEvent = {
-    ...partial,
-    signature: signEd25519(canonicalStringify(partial), privKey),
-  };
-
-  await appendLocalEvent(myPub, earnEvent);
+  // Use the per-pubkey lock so the nonce we sign is also the nonce we
+  // append, with no other writer slipping in between. (Older code did
+  // a "re-read just before append" hack that still left a window.)
+  await appendNextEvent(myPub, (nonce) => {
+    const partial: Omit<EarnEvent, "signature"> = {
+      type: "earn",
+      nonce,
+      timestamp: new Date().toISOString(),
+      amount,
+      task_id: taskId,
+      counterparty_pubkey: claim.cosignerPubkey,
+      counterparty_task_signature: claim.cosignerTaskSignature,
+    };
+    return {
+      ...partial,
+      signature: signEd25519(canonicalStringify(partial), privKey),
+    };
+  });
   const extraNote = extra ? `  (${extra})` : "";
   log(`  ${GR}✓${R}  ${B}+${amount} credits${R}${extraNote}\n`);
 }
@@ -1045,6 +1046,28 @@ export async function loadMineContext(): Promise<MineContext | { error: string }
 // Exported core runners (accept a logger — usable from TUI or CLI)
 // ---------------------------------------------------------------------------
 
+const MINE_WARNING_FILE = `${ASH_DIR}/.mine_warning_seen`;
+
+// One-time host-execution warning. mine runs the AI agent directly on the
+// host with sandbox bypass flags, so a prompt injection in a public PR or
+// issue body would execute on the user's machine. Hidden behind a sentinel
+// file so daily-driver users see it once, not every run.
+async function ensureMineHostWarning(log: Logger, confirm: ConfirmFn): Promise<boolean> {
+  try {
+    await stat(MINE_WARNING_FILE);
+    return true;
+  } catch { /* not yet acknowledged */ }
+  log(`\n  ${YL}⚠  ash mine runs the AI agent directly on your host${R}\n`);
+  log(`     with --dangerously-skip-permissions / --dangerously-bypass-approvals-and-sandbox.\n`);
+  log(`     A prompt-injection in a malicious PR or issue body could read or modify\n`);
+  log(`     any file you can. Do NOT run mine on a machine with sensitive files.\n\n`);
+  const ok = await confirm("Continue anyway?");
+  if (ok) {
+    try { await writeFile(MINE_WARNING_FILE, new Date().toISOString()); } catch { /* best effort */ }
+  }
+  return ok;
+}
+
 export async function runMineCore(
   ctx: MineContext,
   opts: { count: number },
@@ -1052,6 +1075,11 @@ export async function runMineCore(
   confirm: ConfirmFn,
 ): Promise<void> {
   const { token, myPub, privKey, ghLogin, ghEmail, agent } = ctx;
+
+  if (!(await ensureMineHostWarning(log, confirm))) {
+    log(`  ${D}aborted.${R}\n\n`);
+    return;
+  }
 
   // Precheck the configured agent binary so users get a clear error
   // rather than a cryptic "spawn ENOENT" mid-cycle.
@@ -1103,6 +1131,11 @@ export async function runIssueQueryCore(
   confirm: ConfirmFn,
 ): Promise<void> {
   const { token, myPub, privKey, ghLogin, agent } = ctx;
+
+  if (!(await ensureMineHostWarning(log, confirm))) {
+    log(`  ${D}aborted.${R}\n\n`);
+    return;
+  }
 
   const binary = agentBinary(agent);
   if (!(await isBinaryOnPath(binary))) {

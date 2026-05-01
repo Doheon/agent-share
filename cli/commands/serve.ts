@@ -176,11 +176,16 @@ export async function processTask(
   // Claude has no equivalent flag; its stream is still forwarded line-by-line.
   let authHit = false;
   const forwardLogs = agent !== "codex";
+  // Each agent only needs egress to its own provider. Mixing them would
+  // waste an outbound allowance for whichever isn't running.
+  const allowedHosts = agent === "codex"
+    ? ["api.openai.com", "chatgpt.com"]
+    : ["api.anthropic.com"];
   const { exitCode } = await runAgentInSandbox({
     taskDir: workDir,
     agent,
     prompt: active.prompt,
-    allowedHosts: ["api.anthropic.com"],
+    allowedHosts,
     onLog: (line) => {
       logger(`  ${D}${line}${R}\n`);
       if (forwardLogs) {
@@ -379,7 +384,23 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
   const rsaPubPem = await exportPublicKeyPem(rsa.publicKey);
 
   const balance = (await getLocalBalance(myPub)).balance;
-  out(`\n  ${B}${CY}ash serve${R}  ${D}· ${opts.count} tasks  · ${opts.modelTier}  · ${balance}cr${R}\n\n`);
+  out(`\n  ${B}${CY}ash serve${R}  ${D}· ${opts.count} tasks  · ${opts.modelTier}  · ${balance}cr${R}\n`);
+  if (opts.allowSelf) {
+    out(`  ${YL}⚠${R}  --allow-self enabled — you will accept and charge yourself\n`);
+  }
+  // Container runtime exposure is materially different on Linux (rootless
+  // podman) vs macOS/Windows (Docker bridge → host LAN). The bridge case
+  // is a real risk worth surfacing every time so users on cloud instances
+  // notice; the podman case is silent.
+  try {
+    const runtime = await getRuntime();
+    if (runtime === "docker") {
+      out(`  ${YL}⚠${R}  Docker network bridge can reach your host LAN and IP-only\n`);
+      out(`     metadata endpoints (e.g. 169.254.169.254). Run on a machine\n`);
+      out(`     without sensitive LAN neighbours, or use rootless podman.\n`);
+    }
+  } catch { /* runtime check fires again later */ }
+  out("\n");
 
   const { priv: myPriv } = await loadIdentity();
 
