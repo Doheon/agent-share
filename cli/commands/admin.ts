@@ -203,7 +203,7 @@ async function loadMintedSignups(): Promise<Set<string>> {
  * that pubkey. The signature check blocks the "A puts a forged SignupEvent
  * claiming ed25519_public_key=V into A's own core" griefing vector.
  */
-async function peerHasSignupEvent(
+export async function peerHasSignupEvent(
   pubkey: string,
   ledgerKeyHex: string,
   timeoutMs = 5000,
