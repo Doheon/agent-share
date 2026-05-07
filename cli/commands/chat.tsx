@@ -91,6 +91,7 @@ interface PendingTask {
   acceptorPeer: SwarmPeer | null;
   acceptorPubkey: string | null;
   acceptorNextNonce: number;
+  announce?: Extract<P2PMessage, { type: "task:announce" }>;
   onMatchPending?: (peer: SwarmPeer, claimNonce: number, rsaPubPem: string) => Promise<void>;
   onLog?: (line: string) => void;
   onDiff?: (patch: string) => Promise<void>;
@@ -262,7 +263,7 @@ function ChatApp({
 
   // Setup swarm listeners
   useEffect(() => {
-    const unsubConnect = swarm.onConnect(async () => {
+    const unsubConnect = swarm.onConnect(async (peer) => {
       setPeerCount(swarm.getPeers().length);
       const ledgerCoreKey = await getLedgerCoreKey(userId).catch(() => undefined);
       swarm.broadcast({
@@ -272,6 +273,11 @@ function ChatApp({
         model_tier: currentModelRef.current,
         ledger_core_key: ledgerCoreKey,
       });
+      // Re-announce pending task to peers that connect after the initial broadcast.
+      const p = pendingRef.current;
+      if (p && !p.acceptorPeer && p.announce) {
+        peer.send(p.announce);
+      }
     });
     const unsubDisconnect = swarm.onDisconnect(() => setPeerCount(swarm.getPeers().length));
 
@@ -591,6 +597,9 @@ function ChatApp({
       credit_cost: cost,
     };
     swarm.broadcast(announce);
+    if (pendingRef.current) {
+      pendingRef.current.announce = announce as Extract<P2PMessage, { type: "task:announce" }>;
+    }
     addMsg(`  ⎿ announced  (${taskId.slice(0, 8)})`, "#6b6b6b");
     addMsg(`  ${FRAMES[0]} waiting for acceptor…  (esc to cancel)`, "#6b6b6b");
 

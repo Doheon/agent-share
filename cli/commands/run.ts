@@ -342,5 +342,12 @@ export const runCommand = new Command("run")
       requester_ledger_key: requesterLedgerKey,
     };
     swarm.broadcast(announce);
+
+    // Re-announce to peers that connect after the initial broadcast so that
+    // a serve node started after ash run still receives the task.
+    swarm.onConnect((peer) => {
+      if (!acceptorPeer) peer.send(announce);
+    });
+
     console.log(`  announced  (${taskId.slice(0, 8)})  waiting for acceptor…`);
   });
