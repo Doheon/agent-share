@@ -13,7 +13,7 @@ export const CLIENT_VERSION = "0.1.5" as const;
  *  by the requester and at unpack-time by the acceptor. Also rejected at the
  *  swarm message layer so a malicious peer cannot OOM peers with oversized
  *  blob announcements. */
-export const MAX_BLOB_SIZE = 45 * 1024 * 1024; // 45MB
+export const MAX_BLOB_SIZE = 100 * 1024 * 1024; // 100MB
 
 /** Base64 encoding inflates the byte size by ~4/3. Add a small slack for
  *  whitespace tolerance. Used to bound the size of `task:blob.data` strings. */
