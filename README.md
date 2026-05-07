@@ -17,8 +17,19 @@ ash is a TUI. Install it, launch it, do everything from one screen.
 
 ### 1. Install
 
+**npm:**
 ```bash
 npm install -g @doheon/ash
+```
+
+**Homebrew (macOS):**
+```bash
+brew tap doheon/tap
+brew install ash
+```
+
+Then run:
+```bash
 ash init
 ```
 

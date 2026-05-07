@@ -17,8 +17,19 @@ ash는 TUI 입니다. 설치 → 실행 → 한 화면 안에서 모든 작업.
 
 ### 1. 설치
 
+**npm:**
 ```bash
 npm install -g @doheon/ash
+```
+
+**Homebrew (macOS):**
+```bash
+brew tap doheon/tap
+brew install ash
+```
+
+설치 후:
+```bash
 ash init
 ```
 
