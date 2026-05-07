@@ -16,8 +16,8 @@ RUN apk add --no-cache git curl bash nodejs npm && \
 
 # Install AI agents (versions pinned to avoid supply-chain drift; bump deliberately)
 RUN npm install -g --ignore-scripts --no-fund --no-audit \
-    @anthropic-ai/claude-code@1.9.1 \
-    @openai/codex@0.1.2505161818
+    @anthropic-ai/claude-code@2.1.132 \
+    @openai/codex@0.128.0
 
 # Create workspace directory
 RUN mkdir -p /workspace
