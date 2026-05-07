@@ -9,6 +9,15 @@ const FETCH_TIMEOUT_MS = 3_000;
 
 interface Cache { ts: number; latest: string }
 
+function semverGt(a: string, b: string): boolean {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0);
+  }
+  return false;
+}
+
 async function readCache(): Promise<Cache | null> {
   try {
     return JSON.parse(await readFile(CACHE_FILE, "utf8")) as Cache;
@@ -40,7 +49,7 @@ export async function warnIfUpdateAvailable(): Promise<void> {
     refreshInBackground();
   }
 
-  if (cache?.latest && cache.latest !== CLIENT_VERSION) {
+  if (cache?.latest && semverGt(cache.latest, CLIENT_VERSION)) {
     process.stderr.write(
       `\n  update available  ${CLIENT_VERSION} → ${cache.latest}\n` +
       `  npm:   npm install -g @doheon/ash@latest\n` +
