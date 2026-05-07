@@ -49,8 +49,8 @@ State lives at `~/.ash/`. **Requires Node 18+, git, Podman or Docker.**
 # npm
 npm install -g @doheon/ash@latest
 
-# Homebrew
-brew upgrade ash
+# Homebrew — run brew update first to refresh the tap, then upgrade
+brew update && brew upgrade ash
 ```
 
 ash checks for updates once a day and prints a notice when a newer version is available.

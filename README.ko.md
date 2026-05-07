@@ -49,8 +49,8 @@ ash init
 # npm
 npm install -g @doheon/ash@latest
 
-# Homebrew
-brew upgrade ash
+# Homebrew — 탭 캐시를 먼저 갱신한 뒤 업그레이드
+brew update && brew upgrade ash
 ```
 
 ash는 하루 한 번 업데이트를 확인하고, 새 버전이 있으면 실행 시 알려줍니다.
