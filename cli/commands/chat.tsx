@@ -1495,50 +1495,48 @@ export async function runChat(opts: { model?: string } = {}): Promise<void> {
   };
 
   const swarm = new AshSwarm();
-  // Render a banner WHILE swarm.join runs. exitOnCtrlC=true so the user
+  // Render a banner WHILE connecting. exitOnCtrlC=true so the user
   // can abort a stuck cold-start without leaving the terminal hostile.
   const banner = render(<ConnectingBanner />, { exitOnCtrlC: true });
+
+  // Set up ledger replication swarm and fetch balance BEFORE joining the task
+  // swarm (AshSwarm). If repSwarm were set up after swarm.join(), peers could
+  // connect to AshSwarm before ChatApp renders and registers its onConnect
+  // handler — those early connections would be silently missed, leaving
+  // peerCount stuck at 0.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let repSwarm: any = null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { default: Hyperswarm } = (await import("hyperswarm")) as any;
+    repSwarm = new Hyperswarm();
+    const store = await getCorestore();
+    if (ADMIN_LEDGER_KEY) {
+      const ac = store.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
+      await ac.ready().catch(() => {});
+    }
+    repSwarm.join(LEDGER_TOPIC);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    repSwarm.on("connection", (conn: any) => store.replicate(conn));
+    // Wait for peers so download() in getLocalBalance has a peer to pull blocks from.
+    await Promise.race([repSwarm.flush(), new Promise<void>((r) => setTimeout(r, 5000))]);
+    await new Promise<void>((r) => setTimeout(r, 2000));
+  } catch (err) {
+    if (err instanceof Error && err.message) {
+      console.error("[ash] ledger replication swarm failed to start:", err.message);
+    }
+  }
+  const initialBalance = (await getLocalBalance(userId)).balance;
+  const initialServed = (await getEvents(userId)).filter((e) => e.type === "earn").length;
+
+  // Join the task swarm last, right before rendering, so no AshSwarm peer can
+  // connect before ChatApp's useEffect registers its onConnect handler.
   let joinError: Error | null = null;
   try {
     await swarm.join(edPriv, userId);
   } catch (err) {
     joinError = err as Error;
   }
-
-  // Attach Corestore replication on the ledger topic so this node's event
-  // Hypercore is available to serve peers for balance verification.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let repSwarm: any = null;
-  if (!joinError) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { default: Hyperswarm } = (await import("hyperswarm")) as any;
-      repSwarm = new Hyperswarm();
-      const store = await getCorestore();
-      if (ADMIN_LEDGER_KEY) {
-        const ac = store.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
-        await ac.ready().catch(() => {});
-      }
-      repSwarm.join(LEDGER_TOPIC);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      repSwarm.on("connection", (conn: any) => store.replicate(conn));
-    } catch (err) {
-      // Non-fatal — surface after the banner unmounts so it isn't
-      // overwritten by the ChatApp render below.
-      console.error("[ash] ledger replication swarm failed to start:", (err as Error).message);
-    }
-  }
-
-  // Wait for repSwarm peers to connect so download() in getLocalBalance has a
-  // peer to pull blocks from. ConnectingBanner is still visible during this wait.
-  if (repSwarm) {
-    try {
-      await Promise.race([repSwarm.flush(), new Promise<void>((r) => setTimeout(r, 5000))]);
-      await new Promise<void>((r) => setTimeout(r, 2000));
-    } catch { /* non-fatal */ }
-  }
-  const initialBalance = (await getLocalBalance(userId)).balance;
-  const initialServed = (await getEvents(userId)).filter((e) => e.type === "earn").length;
 
   banner.unmount();
 
@@ -1549,6 +1547,7 @@ export async function runChat(opts: { model?: string } = {}): Promise<void> {
     } else {
       console.error(`\n  Failed to join network: ${msg}\n`);
     }
+    await repSwarm?.destroy().catch(() => {});
     await exitWithCleanup(1);
   }
 
