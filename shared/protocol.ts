@@ -7,7 +7,7 @@
  */
 
 export const PROTOCOL_VERSION = 1 as const;
-export const CLIENT_VERSION = "0.1.4" as const;
+export const CLIENT_VERSION = "0.1.5" as const;
 
 /** Maximum size of a packed task blob (raw bytes). Enforced both at pack-time
  *  by the requester and at unpack-time by the acceptor. Also rejected at the
