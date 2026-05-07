@@ -33,7 +33,7 @@ jobs:
       - name: Verify versions
         run: |
           PKG=$(node -p "require('./package.json').version")
-          CLIENT=$(grep 'CLIENT_VERSION' shared/protocol.ts | grep -oP '"\K[^"]+')
+          CLIENT=$(node -e "const f=require('fs').readFileSync('shared/protocol.ts','utf8');console.log(f.match(/CLIENT_VERSION\s*=\s*\"([^\"]+)\"/)[1])")
           if [ "${{ github.event_name }}" = "push" ]; then
             TAG=${GITHUB_REF_NAME#v}
             if [ "$TAG" != "$PKG" ]; then
