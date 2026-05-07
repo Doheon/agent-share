@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { walk } from "../util/walk.ts";
 import { encryptData, exportKey } from "../crypto/aes.ts";
-import { loadGitignorePatterns } from "../util/gitignore.ts";
+import { loadAllGitignorePatterns } from "../util/gitignore.ts";
 import { MAX_BLOB_SIZE } from "../../shared/protocol.ts";
 
 const LARGE_FILE_WARN = 5 * 1024 * 1024;    // individual files >=5MB get reported on error
@@ -29,7 +29,7 @@ interface PackedTar {
 }
 
 async function directoryToTar(dir: string): Promise<PackedTar> {
-  const ignorePatterns = await loadGitignorePatterns(dir);
+  const ignorePatterns = await loadAllGitignorePatterns(dir);
   const entries: { path: string; data: Uint8Array }[] = [];
   const fileSizes: { path: string; size: number }[] = [];
 
