@@ -43,6 +43,18 @@ ash init
 
 상태는 `~/.ash/`에 저장됩니다. **Node 18+, git, Podman 또는 Docker가 필요합니다.**
 
+### 업데이트
+
+```bash
+# npm
+npm install -g @doheon/ash@latest
+
+# Homebrew
+brew upgrade ash
+```
+
+ash는 하루 한 번 업데이트를 확인하고, 새 버전이 있으면 실행 시 알려줍니다.
+
 ### 2. TUI 실행
 
 ```bash

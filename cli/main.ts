@@ -19,6 +19,7 @@ import { getLocalBalance, closeLocalStore } from "./p2p_state.ts";
 import { CLIENT_VERSION } from "../shared/protocol.ts";
 import { getAgentStatus, type AgentStatus } from "./commands/init.ts";
 import { modelToAgent } from "../shared/types.ts";
+import { warnIfUpdateAvailable } from "./update.ts";
 
 function exitNotInitialized(err: NotInitializedError): never {
   console.error(`\nerror: ${err.reason}\n  → ${err.hint}\n`);
@@ -91,4 +92,5 @@ program.addCommand(
     }),
 );
 
+await warnIfUpdateAvailable();
 await program.parseAsync();
