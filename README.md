@@ -10,6 +10,30 @@
 
 <img width="500" alt="ash_request" src="https://github.com/user-attachments/assets/b7ab2076-4f1b-44bc-9bd6-e4bce2c43f07" />
 
+*Typing a prompt in the ash TUI — a peer picks it up, runs the AI agent, and returns a diff.*
+
+```mermaid
+graph LR
+    subgraph Requester machine
+        R(("Requester"))
+    end
+
+    subgraph Acceptor machine
+        A(("Acceptor"))
+        subgraph Docker / Podman
+            VM(("Container"))
+        end
+    end
+
+    R -->|"① pack + encrypt"| A
+    A -->|"② decrypt + unpack"| VM
+    VM -->|"③ run AI agent → git diff"| A
+    A -->|"④ return diff"| R
+    R -->|"⑤ apply patch + settle credits"| A
+```
+
+*Code is packed and encrypted on the requester's machine, executed inside an isolated container on the acceptor's machine, and only the diff is returned.*
+
 **ash** is a peer-to-peer network where anyone can earn AI credits by running tasks for others, then spend those credits to get their own code written — no subscription, no central server.
 
 - Hit Claude Code's usage limit? Keep going with credits you earned
@@ -143,15 +167,41 @@ For scripts, cron jobs, and CI:
 ash is peer-to-peer, not a server. Identity is an Ed25519 keypair on disk; ledgers are append-only Hypercores replicated over Hyperswarm.
 
 ```mermaid
-sequenceDiagram
-    participant R as Requester
-    participant A as Acceptor
-    R->>A: encrypted task blob
-    Note over A: AI agent runs in<br/>Podman / Docker sandbox
-    A->>R: signed diff
-    R->>A: cosign (spend & earn)
-    Note over R,A: both ledgers updated atomically
+graph LR
+    subgraph Requester machine
+        R(("Requester"))
+    end
+
+    subgraph Acceptor machine
+        A(("Acceptor"))
+        subgraph Docker / Podman
+            VM(("Container"))
+        end
+    end
+
+    R -->|"① pack + encrypt"| A
+    A -->|"② decrypt + unpack"| VM
+    VM -->|"③ run AI agent → git diff"| A
+    A -->|"④ return diff"| R
+    R -->|"⑤ apply patch + settle credits"| A
 ```
+
+**Step by step:**
+
+**Requester**
+1. Scans `cwd`, excluding `.gitignore` patterns from all directories, and packs files into a tar archive
+2. Generates a random AES-256-GCM key, encrypts the tar, and announces the task over Hyperswarm
+3. On `task:claim`, encrypts the AES key with the acceptor's RSA-OAEP public key and sends it
+4. Receives the diff, reviews it, and applies the patch if approved
+5. Signs and sends a spend event; credits are deducted from the local ledger
+
+**Acceptor**
+1. Claims the task and sends its RSA public key so only it can decrypt the AES key
+2. Receives the encrypted blob, decrypts it with the exchanged AES key, and unpacks to a temp directory
+3. Runs the AI agent (Claude Code or Codex) inside a Docker/Podman container — network restricted to the AI provider only
+4. Extracts a `git diff` of all changes made by the agent
+5. Sends the diff back; temp directory and container are deleted immediately after
+6. On requester approval, signs an earn event; credits are added to the local ledger
 
 **Key properties:**
 
