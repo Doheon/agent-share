@@ -137,6 +137,7 @@ interface ChatProps {
   initialModel: string;
   initialBalance: number;
   initialServed: number;
+  setupPromise: Promise<{ balance: number; served: number }>;
   swarm: AshSwarm;
   absDir: string;
 }
@@ -144,30 +145,6 @@ interface ChatProps {
 let _idCounter = 0;
 const nextId = () => ++_idCounter;
 
-// Shown while Hyperswarm bootstraps. On a cold start (no DHT cache) the
-// first peer can take 30–90s to discover; without something on screen the
-// user assumes ash hung and Ctrl+Cs out.
-function ConnectingBanner(): React.ReactElement {
-  const [dots, setDots] = useState(".");
-  const [secs, setSecs] = useState(0);
-  useEffect(() => {
-    const dotTimer = setInterval(
-      () => setDots((d) => (d.length >= 3 ? "." : d + ".")),
-      400,
-    );
-    const secTimer = setInterval(() => setSecs((s) => s + 1), 1000);
-    return () => {
-      clearInterval(dotTimer);
-      clearInterval(secTimer);
-    };
-  }, []);
-  return (
-    <Box flexDirection="column" paddingY={1} paddingX={2}>
-      <Text color="#88ff88">  joining ash network{dots}  </Text>
-      <Text dimColor>  cold start can take 30–90s · {secs}s elapsed · ctrl+c to abort</Text>
-    </Box>
-  );
-}
 
 function semverGt(a: string, b: string): boolean {
   const pa = a.split(".").map(Number);
@@ -179,7 +156,7 @@ function semverGt(a: string, b: string): boolean {
 }
 
 function ChatApp({
-  userId, username, edPriv, models, initialModel, initialBalance, initialServed, swarm, absDir,
+  userId, username, edPriv, models, initialModel, initialBalance, initialServed, setupPromise, swarm, absDir,
 }: ChatProps) {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -203,6 +180,7 @@ function ChatApp({
   const [currentModel, setCurrentModelState] = useState(initialModel);
   const [balance, setBalance] = useState(initialBalance);
   const [served, setServed] = useState(initialServed);
+  const [syncing, setSyncing] = useState(true);
   const [peerCount, setPeerCount] = useState(0);
   const [inflightStatus, setInflightStatus] = useState<{
     startTs: number;
@@ -223,6 +201,14 @@ function ChatApp({
   const [serveDisplay, setServeDisplay] = useState<ServeDisplay | null>(null);
 
   useEffect(() => { currentModelRef.current = currentModel; }, [currentModel]);
+
+  useEffect(() => {
+    setupPromise.then(({ balance: b, served: s }) => {
+      setBalance(b);
+      setServed(s);
+      setSyncing(false);
+    }).catch(() => setSyncing(false));
+  }, []);
 
   const refreshServeDisplay = useCallback(() => {
     const sm = serveModeRef.current;
@@ -1439,9 +1425,12 @@ function ChatApp({
             <Text color="#4a9eff">{labelFor(currentModel)}</Text>
             <Text color="#888888">{` (${creditsFor(currentModel)}cr/task)`}</Text>
             <Text color="#555555">{"  balance: "}</Text>
-            <Text color="#7cd38a">{balance}cr</Text>
+            {syncing
+              ? <Text color="#888888">syncing…</Text>
+              : <Text color="#7cd38a">{balance}cr</Text>
+            }
             <Text color="#555555">{"  served: "}</Text>
-            <Text color="#7cd38a">{served}</Text>
+            <Text color="#7cd38a">{syncing ? "…" : String(served)}</Text>
             <Text color="#555555">{"  turn: "}</Text>
             <Text color="#cccccc">{turns.length}</Text>
             <Text color="#555555">{"  peers: "}</Text>
@@ -1488,50 +1477,15 @@ export async function runChat(opts: { model?: string } = {}): Promise<void> {
   };
 
   const swarm = new AshSwarm();
-  // Render a banner WHILE connecting. exitOnCtrlC=true so the user
-  // can abort a stuck cold-start without leaving the terminal hostile.
-  const banner = render(<ConnectingBanner />, { exitOnCtrlC: true });
 
-  // Set up ledger replication swarm and fetch balance BEFORE joining the task
-  // swarm (AshSwarm). If repSwarm were set up after swarm.join(), peers could
-  // connect to AshSwarm before ChatApp renders and registers its onConnect
-  // handler — those early connections would be silently missed, leaving
-  // peerCount stuck at 0.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let repSwarm: any = null;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { default: Hyperswarm } = (await import("hyperswarm")) as any;
-    repSwarm = new Hyperswarm();
-    const store = await getCorestore();
-    if (ADMIN_LEDGER_KEY) {
-      const ac = store.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
-      await ac.ready().catch(() => {});
-    }
-    repSwarm.join(LEDGER_TOPIC);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    repSwarm.on("connection", (conn: any) => store.replicate(conn));
-    // Wait for peers so download() in getLocalBalance has a peer to pull blocks from.
-    await Promise.race([repSwarm.flush(), new Promise<void>((r) => setTimeout(r, 5000))]);
-    await new Promise<void>((r) => setTimeout(r, 2000));
-  } catch (err) {
-    if (err instanceof Error && err.message) {
-      console.error("[ash] ledger replication swarm failed to start:", err.message);
-    }
-  }
-  const initialBalance = (await getLocalBalance(userId)).balance;
-  const initialServed = (await getEvents(userId)).filter((e) => e.type === "earn").length;
-
-  // Join the task swarm last, right before rendering, so no AshSwarm peer can
-  // connect before ChatApp's useEffect registers its onConnect handler.
+  // Join the task swarm before rendering so no early peer connection is missed
+  // by ChatApp's onConnect handler.
   let joinError: Error | null = null;
   try {
     await swarm.join(edPriv, userId);
   } catch (err) {
     joinError = err as Error;
   }
-
-  banner.unmount();
 
   if (joinError) {
     const msg = joinError.message ?? "";
@@ -1540,9 +1494,37 @@ export async function runChat(opts: { model?: string } = {}): Promise<void> {
     } else {
       console.error(`\n  Failed to join network: ${msg}\n`);
     }
-    await repSwarm?.destroy().catch(() => {});
     await exitWithCleanup(1);
   }
+
+  // Ledger replication and balance fetch run in the background so the chat UI
+  // renders immediately. ChatApp awaits this promise and updates once ready.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let repSwarm: any = null;
+  const setupPromise: Promise<{ balance: number; served: number }> = (async () => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { default: Hyperswarm } = (await import("hyperswarm")) as any;
+      repSwarm = new Hyperswarm();
+      const store = await getCorestore();
+      if (ADMIN_LEDGER_KEY) {
+        const ac = store.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
+        await ac.ready().catch(() => {});
+      }
+      repSwarm.join(LEDGER_TOPIC);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      repSwarm.on("connection", (conn: any) => store.replicate(conn));
+      await Promise.race([repSwarm.flush(), new Promise<void>((r) => setTimeout(r, 5000))]);
+      await new Promise<void>((r) => setTimeout(r, 2000));
+    } catch (err) {
+      if (err instanceof Error && err.message) {
+        console.error("[ash] ledger replication swarm failed to start:", err.message);
+      }
+    }
+    const balance = (await getLocalBalance(userId)).balance;
+    const served = (await getEvents(userId)).filter((e) => e.type === "earn").length;
+    return { balance, served };
+  })();
 
   const { waitUntilExit } = render(
     <ChatApp
@@ -1551,8 +1533,9 @@ export async function runChat(opts: { model?: string } = {}): Promise<void> {
       edPriv={edPriv}
       models={models}
       initialModel={initialModel}
-      initialBalance={initialBalance}
-      initialServed={initialServed}
+      initialBalance={0}
+      initialServed={0}
+      setupPromise={setupPromise}
       swarm={swarm}
       absDir={absDir}
     />,
@@ -1560,6 +1543,7 @@ export async function runChat(opts: { model?: string } = {}): Promise<void> {
   );
 
   await waitUntilExit();
+  await setupPromise.catch(() => {});
   await repSwarm?.destroy().catch(() => {});
   // Release the corestore handle on exit. Without this the file lock
   // can linger long enough that a second `ash` invocation in the next
