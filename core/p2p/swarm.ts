@@ -68,6 +68,9 @@ export class AshSwarm {
   private pubKeyHex: string = "";
   // id → Map<connKey(Symbol), sendFn> — tracks simultaneous duplicate connections
   private activeSends = new Map<string, Map<symbol, (msg: P2PMessage) => void>>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private discovery: any = null;
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   async join(
     privKey: KeyObject,
@@ -86,14 +89,23 @@ export class AshSwarm {
 
     this.swarm.on("connection", (conn: Conn) => this.handleConnection(conn));
 
-    this.swarm.join(TOPIC, { server: true, client: true });
-    // In production, we skip flush() — on a cold/offline box the DHT query
-    // never settles and the old 5s cap was the only reason `ash` felt slow.
-    // In testnet mode (bootstrap provided), flush() completes quickly and
-    // ensures the node is announced before join() returns, so a second swarm
-    // joining afterwards can immediately discover this one via DHT lookup.
-    if (opts?.bootstrap) {
-      await this.swarm.flush().catch(() => undefined);
+    this.discovery = this.swarm.join(TOPIC, { server: true, client: true });
+    // Flush so our announcement propagates before join() returns — required for
+    // same-machine and LAN peer discovery. Cap at 3 s in production (offline boxes
+    // time out harmlessly); testnet completes in <100 ms so we give it 10 s.
+    await Promise.race([
+      this.swarm.flush(),
+      new Promise<void>((r) => setTimeout(r, opts?.bootstrap ? 10_000 : 3_000)),
+    ]).catch(() => undefined);
+
+    // Schedule a follow-up DHT refresh 10 s later. Two processes that start
+    // simultaneously may miss each other's initial announcement; the refresh
+    // re-queries the topic once both are fully announced.
+    if (!opts?.bootstrap) {
+      this.refreshTimer = setTimeout(() => {
+        this.refreshTimer = null;
+        this.discovery?.refresh?.();
+      }, 10_000);
     }
   }
 
@@ -400,12 +412,17 @@ export class AshSwarm {
 
   async destroy(): Promise<void> {
     if (!this.swarm) return;
+    if (this.refreshTimer !== null) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
     try {
       await this.swarm.destroy();
     } catch {
       /* ignore */
     }
     this.swarm = null;
+    this.discovery = null;
     this.peers.clear();
     this.activeSends.clear();
     try { rmSync(this.storage, { recursive: true, force: true }); } catch { /* ignore */ }
