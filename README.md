@@ -12,6 +12,7 @@
 
 **ash** is a peer-to-peer network where anyone can earn AI credits by running tasks for others, then spend those credits to get their own code written — no subscription, no central server.
 
+- Hit Claude Code's usage limit? Keep going with credits you earned
 - Run `ash serve` while you sleep → earn credits
 - Type a prompt → a peer runs your AI agent → you get a diff
 - Works with **Claude Code** and **Codex**
