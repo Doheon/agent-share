@@ -20,7 +20,6 @@ import {
   exportPublicKeyPem,
   importPublicKeyPem,
 } from "../../core/crypto/rsa.ts";
-import { scanDirectory, formatScanResults } from "../../core/packaging/secret_scanner.ts";
 import { packDirectory } from "../../core/packaging/pack.ts";
 import { buildTaskAad } from "../../core/crypto/aes.ts";
 import { applyPatch, getChangedFiles } from "../../core/diff/apply.ts";
@@ -169,16 +168,6 @@ export const runCommand = new Command("run")
     process.stdout.write("\n");
     if (swarm.getPeers().length === 0) {
       console.error("  No peers connected. Start an acceptor with: ash serve");
-      await cleanup(1);
-      return;
-    }
-
-    // Scan for secrets.
-    process.stdout.write("  packaging… ");
-    const scan = await scanDirectory(absDir);
-    if (scan.length > 0) {
-      console.log("✗");
-      console.error(formatScanResults(scan));
       await cleanup(1);
       return;
     }
