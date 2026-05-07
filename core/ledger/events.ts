@@ -316,7 +316,8 @@ async function replayAdminMints(recipientPubkey: string): Promise<number> {
     let signupCounted = false;
     for (let i = 0; i < adminCore.length; i++) {
       try {
-        const raw = await adminCore.get(i) as string;
+        const raw = await adminCore.get(i, { wait: false }) as string | null;
+        if (raw === null) continue;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const event = JSON.parse(raw) as any;
         if (
@@ -414,7 +415,8 @@ export async function getAdminMintsFor(recipientPubkey: string): Promise<Event[]
     const mints: Event[] = [];
     for (let i = 0; i < adminCore.length; i++) {
       try {
-        const raw = await adminCore.get(i) as string;
+        const raw = await adminCore.get(i, { wait: false }) as string | null;
+        if (raw === null) continue;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const event = JSON.parse(raw) as any;
         if (event.type === "mint" && event.recipient_pubkey === recipientPubkey) {
