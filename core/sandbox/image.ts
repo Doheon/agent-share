@@ -1,12 +1,11 @@
 import { join } from "node:path";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { getRuntime, type ContainerRuntime } from "./runtime.ts";
 import { spawn } from "../util/spawn.ts";
 
 const IMAGE_NAME = "agent-share-sandbox";
-const IMAGE_TAG  = "latest";
-const FULL_IMAGE = `${IMAGE_NAME}:${IMAGE_TAG}`;
 
 const CONTAINERFILE = `
 FROM alpine:3.19
@@ -14,10 +13,11 @@ FROM alpine:3.19
 RUN apk add --no-cache git curl bash nodejs npm && \
     apk upgrade --no-cache
 
-# Install AI agents (versions pinned to avoid supply-chain drift; bump deliberately)
+# Install latest AI agents — image tag is a hash of this file so any change
+# here automatically invalidates the cached image and triggers a rebuild.
 RUN npm install -g --ignore-scripts --no-fund --no-audit \
-    @anthropic-ai/claude-code@2.1.132 \
-    @openai/codex@0.128.0
+    @anthropic-ai/claude-code \
+    @openai/codex
 
 # Create workspace directory
 RUN mkdir -p /workspace
@@ -33,6 +33,12 @@ RUN git config --global user.email "sandbox@agent-share" && \\
 
 ENTRYPOINT ["/bin/sh", "-c"]
 `.trim();
+
+// Derive the image tag from the Dockerfile content so any change to the
+// Containerfile automatically invalidates the cached local image. Users
+// with an older tag will see imageExists() return false and trigger a rebuild.
+const IMAGE_TAG  = createHash("sha256").update(CONTAINERFILE).digest("hex").slice(0, 12);
+const FULL_IMAGE = `${IMAGE_NAME}:${IMAGE_TAG}`;
 
 async function runCli(
   runtime: ContainerRuntime,
