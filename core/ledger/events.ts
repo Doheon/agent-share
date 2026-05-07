@@ -309,11 +309,11 @@ async function replayAdminMints(recipientPubkey: string): Promise<number> {
   try {
     const adminCore = await openAdminCore();
     if (!adminCore) return 0;
-    // Pull latest blocks from any connected peer (cap at 2 s so balance
-    // reads stay fast; subsequent calls are instant once blocks are cached).
+    // Pull latest blocks from any connected peer. Allow up to 8 s on cold
+    // starts (DHT connection + first replication round-trip); cached after.
     await Promise.race([
       adminCore.update?.().catch(() => undefined),
-      new Promise<void>((r) => setTimeout(r, 2000)),
+      new Promise<void>((r) => setTimeout(r, 8000)),
     ]);
     if (adminCore.length === 0) return 0;
     const adminPubKey = rawHexToPublicKey(ADMIN_PUBKEY);
@@ -420,7 +420,7 @@ export async function getAdminMintsFor(recipientPubkey: string): Promise<Event[]
     if (!adminCore) return [];
     await Promise.race([
       adminCore.update?.().catch(() => undefined),
-      new Promise<void>((r) => setTimeout(r, 3000)),
+      new Promise<void>((r) => setTimeout(r, 8000)),
     ]);
     if (adminCore.length === 0) return [];
     const adminPubKey = rawHexToPublicKey(ADMIN_PUBKEY);
