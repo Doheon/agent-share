@@ -25,7 +25,7 @@ supabase/.temp/
 
 # Claude
 CLAUDE.md
-.claude/settings.json
+.claude/
 
 # Plan
 PLAN.md

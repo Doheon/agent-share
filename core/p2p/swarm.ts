@@ -64,8 +64,14 @@ export class AshSwarm {
   private readonly storage = `${tmpdir()}/ash-swarm-${process.pid}`;
   private privKey: KeyObject | null = null;
   private pubKeyHex: string = "";
+  // id → Map<connKey(Symbol), sendFn> — tracks simultaneous duplicate connections
+  private activeSends = new Map<string, Map<symbol, (msg: P2PMessage) => void>>();
 
-  async join(privKey: KeyObject, pubKeyHex: string): Promise<void> {
+  async join(
+    privKey: KeyObject,
+    pubKeyHex: string,
+    opts?: { bootstrap?: Array<{ host: string; port: number }> },
+  ): Promise<void> {
     this.privKey = privKey;
     this.pubKeyHex = pubKeyHex;
 
@@ -74,18 +80,23 @@ export class AshSwarm {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { default: Hyperswarm } = (await import("hyperswarm")) as any;
     // eslint-disable-next-line new-cap
-    this.swarm = new Hyperswarm();
+    this.swarm = new Hyperswarm(opts?.bootstrap ? { bootstrap: opts.bootstrap } : {});
 
     this.swarm.on("connection", (conn: Conn) => this.handleConnection(conn));
 
     this.swarm.join(TOPIC, { server: true, client: true });
-    // Peers arrive asynchronously via the "connection" event, so we don't
-    // block on `swarm.flush()` here — on a fresh / offline box DHT discovery
-    // never settles and the old 5s cap was the sole reason `ash` took 5s to
-    // render. Callers react to peer arrivals via onConnect.
+    // In production, we skip flush() — on a cold/offline box the DHT query
+    // never settles and the old 5s cap was the only reason `ash` felt slow.
+    // In testnet mode (bootstrap provided), flush() completes quickly and
+    // ensures the node is announced before join() returns, so a second swarm
+    // joining afterwards can immediately discover this one via DHT lookup.
+    if (opts?.bootstrap) {
+      await this.swarm.flush().catch(() => undefined);
+    }
   }
 
   private handleConnection(conn: Conn): void {
+    const connKey = Symbol();
     const id: string = conn.remotePublicKey.toString("hex");
 
     // Channel binding: include the local + remote Noise transport keys in
@@ -150,20 +161,75 @@ export class AshSwarm {
       handshakeDone = true;
       clearTimeout(handshakeTimer);
 
-      const peer: SwarmPeer = {
-        id,
-        pubkey: verifiedPubkey,
-        send: (msg: P2PMessage): void => {
+      // Serialize writes: if conn.write() returns false (TCP buffer full /
+      // backpressure), queue subsequent messages and drain before sending.
+      // Writes are synchronous when the queue is empty so test assertions work.
+      let backpressured = false;
+      const writeQueue: string[] = [];
+      const flushWriteQueue = (): void => {
+        while (writeQueue.length > 0) {
+          const line = writeQueue[0];
+          let flushed: boolean;
           try {
-            conn.write(JSON.stringify(msg) + "\n");
+            flushed = conn.write(line);
           } catch (err) {
             debugLog(`[swarm] write error for peer ${id.slice(0, 16)}:`, (err as Error).message);
+            writeQueue.shift();
+            continue;
           }
-        },
+          writeQueue.shift();
+          if (!flushed) {
+            backpressured = true;
+            conn.once("drain", () => {
+              backpressured = false;
+              flushWriteQueue();
+            });
+            break;
+          }
+        }
       };
-      this.peers.set(id, peer);
-      for (const h of this.connectHandlers) h(peer);
+      const sendFn = (msg: P2PMessage): void => {
+        const line = JSON.stringify(msg) + "\n";
+        if (backpressured) {
+          writeQueue.push(line);
+          return;
+        }
+        let flushed: boolean;
+        try {
+          flushed = conn.write(line);
+        } catch (err) {
+          debugLog(`[swarm] write error for peer ${id.slice(0, 16)}:`, (err as Error).message);
+          return;
+        }
+        if (!flushed) {
+          backpressured = true;
+          conn.once("drain", () => {
+            backpressured = false;
+            flushWriteQueue();
+          });
+        }
+      };
+
+      // Register this connection in activeSends; if a peer entry already
+      // exists (duplicate simultaneous connection) update its send pointer
+      // rather than firing onConnect again.
+      let connMap = this.activeSends.get(id);
+      if (!connMap) {
+        connMap = new Map();
+        this.activeSends.set(id, connMap);
+      }
+      connMap.set(connKey, sendFn);
+
+      const existingPeer = this.peers.get(id);
+      if (existingPeer) {
+        existingPeer.send = sendFn;
+      } else {
+        const peer: SwarmPeer = { id, pubkey: verifiedPubkey, send: sendFn };
+        this.peers.set(id, peer);
+        for (const h of this.connectHandlers) h(peer);
+      }
       // Deliver any application messages that arrived during the handshake.
+      const peer = this.peers.get(id)!;
       for (const msg of buffered) {
         for (const h of this.handlers) h(peer, msg);
       }
@@ -267,8 +333,23 @@ export class AshSwarm {
 
     const cleanup = (): void => {
       clearTimeout(handshakeTimer);
-      if (!this.peers.delete(id)) return; // never completed handshake — no disconnect event
-      for (const h of this.disconnectHandlers) h(id);
+      const connMap = this.activeSends.get(id);
+      if (connMap) {
+        connMap.delete(connKey);
+        if (connMap.size === 0) {
+          this.activeSends.delete(id);
+          if (this.peers.delete(id)) {
+            for (const h of this.disconnectHandlers) h(id);
+          }
+        } else {
+          // Fall back to whichever connection is still alive.
+          const current = this.peers.get(id);
+          if (current) current.send = [...connMap.values()].at(-1)!;
+        }
+      } else if (this.peers.delete(id)) {
+        // Handshake completed but activeSends entry missing — still fire disconnect.
+        for (const h of this.disconnectHandlers) h(id);
+      }
     };
     conn.on("close", cleanup);
     conn.on("error", cleanup);
@@ -321,6 +402,7 @@ export class AshSwarm {
     }
     this.swarm = null;
     this.peers.clear();
+    this.activeSends.clear();
     try { rmSync(this.storage, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 }

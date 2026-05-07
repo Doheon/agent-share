@@ -2,7 +2,15 @@
   "name": "@doheon/ash",
   "version": "0.1.0",
   "description": "Distributed P2P AI coding agent network — share idle compute, earn credits, fully self-hosted.",
-  "keywords": ["ai", "agent", "p2p", "cli", "claude", "codex", "hyperswarm"],
+  "keywords": [
+    "ai",
+    "agent",
+    "p2p",
+    "cli",
+    "claude",
+    "codex",
+    "hyperswarm"
+  ],
   "license": "MIT",
   "author": "Doheon",
   "repository": {
@@ -50,6 +58,7 @@
     "tsx": "^4.21.0"
   },
   "devDependencies": {
+    "@hyperswarm/testnet": "^3.1.4",
     "@types/node": "^22",
     "@types/react": "^19",
     "vitest": "latest"
