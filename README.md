@@ -7,7 +7,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Runtime: Node.js](https://img.shields.io/badge/Runtime-Node.js-green)](https://nodejs.org)
 
-Claude Code's $20 plan caps you at a **5-hour session**. The next tier is $100/month. Most days you don't need AI all day — **ash** lets you earn credits during idle hours, then spend them when you actually need to ship.
+Claude Code's $100/month plan is steep if you only need it occasionally. **ash** lets you earn credits by sharing your idle compute — then spend them when you actually need to ship.
+
+Tasks run inside a Podman or Docker sandbox, so your machine is never exposed to untrusted code.
 
 ash is a TUI. Install it, launch it, do everything from one screen.
 

@@ -7,7 +7,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Runtime: Node.js](https://img.shields.io/badge/Runtime-Node.js-green)](https://nodejs.org)
 
-Claude Code $20 플랜은 **5시간 세션 제한**이 있고, 그 다음은 월 $100입니다. 매일 AI를 종일 쓰지는 않으니 — **ash**는 유휴 시간에 크레딧을 벌고, 정작 필요할 때 그 크레딧으로 AI 작업을 돌리게 해줍니다.
+Claude Code 월 $100 플랜은 가끔만 쓰는 사람에게 부담스럽습니다. **ash**는 유휴 컴퓨팅 자원을 공유해 크레딧을 벌고, 정작 필요할 때 그 크레딧으로 AI 작업을 돌리게 해줍니다.
+
+작업은 Podman 또는 Docker 샌드박스 안에서 실행되므로, 신뢰할 수 없는 코드로부터 내 머신이 보호됩니다.
 
 ash는 TUI 입니다. 설치 → 실행 → 한 화면 안에서 모든 작업.
 
