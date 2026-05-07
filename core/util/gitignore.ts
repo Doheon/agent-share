@@ -9,14 +9,9 @@ import { join } from "node:path";
  *     A previous version converted `!build` into a literal `\!build`
  *     pattern that effectively re-included the file under a wrong name.
  *     Skipping is the safer default for a v0.1 packing path — falsely
- *     ignoring is worse than falsely shipping (the latter is caught by
- *     `secret_scanner.ts` and `ALWAYS_IGNORE`).
+ *     ignoring is worse than falsely shipping.
  *   - `**` is approximated by `.*`, no path-segment-anchored matching.
  *   - Trailing-slash directory-only matching is not enforced.
- *
- * For projects with non-trivial ignore rules, callers should treat the
- * pack contents as best-effort and rely on `secret_scanner` to catch the
- * dangerous outliers (.env, credentials, etc.).
  */
 export async function loadGitignorePatterns(dir: string): Promise<RegExp[]> {
   try {

@@ -21,7 +21,6 @@ import {
   exportPublicKeyPem,
   importPublicKeyPem,
 } from "../../core/crypto/rsa.ts";
-import { scanDirectory, formatScanResults } from "../../core/packaging/secret_scanner.ts";
 import { packDirectory } from "../../core/packaging/pack.ts";
 import { buildTaskAad } from "../../core/crypto/aes.ts";
 import { applyPatch, getChangedFiles } from "../../core/diff/apply.ts";
@@ -557,12 +556,6 @@ function ChatApp({
     let blobSize = 0;
 
     try {
-      const scan = await scanDirectory(absDir);
-      if (scan.length > 0) {
-        updateLastMsg("  ✗ sensitive info detected");
-        addMsg(formatScanResults(scan), "#ff8888");
-        return;
-      }
       const { ciphertext, iv, aesKeyRaw: keyRaw } = await packDirectory(absDir, aad);
       aesKeyRaw = keyRaw;
       ciphertextB64 = Buffer.from(ciphertext).toString("base64");
