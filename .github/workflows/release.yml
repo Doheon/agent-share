@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (skip npm publish, GitHub release, and Homebrew update)'
+        type: boolean
+        default: true
 
 jobs:
   release:
@@ -26,18 +32,22 @@ jobs:
       # Verify tag version matches package.json and CLIENT_VERSION
       - name: Verify versions
         run: |
-          TAG=${GITHUB_REF_NAME#v}
           PKG=$(node -p "require('./package.json').version")
           CLIENT=$(grep 'CLIENT_VERSION' shared/protocol.ts | grep -oP '"\K[^"]+')
-          if [ "$TAG" != "$PKG" ]; then
-            echo "error: tag $TAG != package.json $PKG"
-            exit 1
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG=${GITHUB_REF_NAME#v}
+            if [ "$TAG" != "$PKG" ]; then
+              echo "error: tag $TAG != package.json $PKG"; exit 1
+            fi
+            if [ "$TAG" != "$CLIENT" ]; then
+              echo "error: tag $TAG != CLIENT_VERSION $CLIENT"; exit 1
+            fi
+          else
+            if [ "$PKG" != "$CLIENT" ]; then
+              echo "error: package.json $PKG != CLIENT_VERSION $CLIENT"; exit 1
+            fi
           fi
-          if [ "$TAG" != "$CLIENT" ]; then
-            echo "error: tag $TAG != CLIENT_VERSION $CLIENT"
-            exit 1
-          fi
-          echo "VERSION=$TAG" >> $GITHUB_ENV
+          echo "VERSION=$PKG" >> $GITHUB_ENV
 
       # Pack locally to get sha256 before publishing
       - name: Pack and compute sha256
@@ -46,13 +56,17 @@ jobs:
           TARBALL=$(ls *.tgz)
           SHA256=$(sha256sum $TARBALL | awk '{print $1}')
           echo "SHA256=$SHA256" >> $GITHUB_ENV
+          echo "dry_run: ${{ inputs.dry_run }}"
+          echo "version: $VERSION, sha256: $SHA256"
 
       - name: Publish to npm
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
         run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub Release
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -61,6 +75,7 @@ jobs:
             --generate-notes
 
       - name: Update Homebrew formula
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
         env:
           TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
         run: |
