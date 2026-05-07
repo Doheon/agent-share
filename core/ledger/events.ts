@@ -308,7 +308,14 @@ async function replayAdminMints(recipientPubkey: string): Promise<number> {
   if (!ADMIN_PUBKEY) return 0;
   try {
     const adminCore = await openAdminCore();
-    if (!adminCore || adminCore.length === 0) return 0;
+    if (!adminCore) return 0;
+    // Pull latest blocks from any connected peer (cap at 2 s so balance
+    // reads stay fast; subsequent calls are instant once blocks are cached).
+    await Promise.race([
+      adminCore.update?.().catch(() => undefined),
+      new Promise<void>((r) => setTimeout(r, 2000)),
+    ]);
+    if (adminCore.length === 0) return 0;
     const adminPubKey = rawHexToPublicKey(ADMIN_PUBKEY);
     let total = 0;
     // Invariant: at most one `reason: "signup"` mint per recipient is credited.
@@ -410,6 +417,11 @@ export async function getAdminMintsFor(recipientPubkey: string): Promise<Event[]
   if (!ADMIN_PUBKEY) return [];
   try {
     const adminCore = await openAdminCore();
+    if (!adminCore) return [];
+    await Promise.race([
+      adminCore.update?.().catch(() => undefined),
+      new Promise<void>((r) => setTimeout(r, 3000)),
+    ]);
     if (adminCore.length === 0) return [];
     const adminPubKey = rawHexToPublicKey(ADMIN_PUBKEY);
     const mints: Event[] = [];
