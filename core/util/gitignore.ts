@@ -25,7 +25,13 @@ export async function loadGitignorePatterns(dir: string): Promise<RegExp[]> {
       // that ignored every path containing `!keep.txt`.
       .filter((l) => !l.startsWith("!"))
       .map((pattern) => {
-        const escaped = pattern
+        // Strip trailing slash — gitignore uses it to mark directory-only
+        // patterns, but our regex already anchors on path separators so the
+        // slash would prevent matching deeper paths (e.g. `venv/` would fail
+        // to match `venv/lib/...` because `venv/` + `(/|$)` requires a
+        // second `/` immediately after).
+        const clean = pattern.endsWith("/") ? pattern.slice(0, -1) : pattern;
+        const escaped = clean
           .replace(/[.+^${}()|[\]\\]/g, "\\$&")
           .replace(/\*/g, ".*")
           .replace(/\?/g, ".");
