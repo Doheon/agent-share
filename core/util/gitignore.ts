@@ -8,10 +8,15 @@ const NEVER_DESCEND = [/^\.git$/, /^node_modules$/, /^\.omc$/, /^\.claude$/];
 /**
  * Converts raw .gitignore lines to RegExp matchers anchored under `prefix`.
  *
- * Limitations vs full gitignore semantics:
+ * Follows git gitignore semantics:
  *   - `!negation` lines are skipped.
- *   - `**` is approximated by `.*`.
- *   - Trailing-slash directory-only matching is stripped (not enforced).
+ *   - Leading `/` anchors the pattern to the gitignore's own directory.
+ *   - An interior `/` (e.g. `src/foo`) also anchors the pattern.
+ *   - Patterns without any `/` match at any depth within the prefix subtree.
+ *   - `*` matches any characters except `/` (does not cross directory boundaries).
+ *   - `**` matches across directory boundaries.
+ *   - `?` matches any single character except `/`.
+ *   - Trailing `/` denotes directory-only matching (stripped; path separator handles it).
  */
 function linesToPatterns(lines: string[], prefix = ""): RegExp[] {
   const escapedPrefix = prefix
@@ -21,12 +26,31 @@ function linesToPatterns(lines: string[], prefix = ""): RegExp[] {
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith("#") && !l.startsWith("!"))
     .map((pattern) => {
-      const clean = pattern.endsWith("/") ? pattern.slice(0, -1) : pattern;
+      // Trailing slash means directory-only; strip it
+      const noTrailing = pattern.endsWith("/") ? pattern.slice(0, -1) : pattern;
+
+      // Leading slash anchors to the gitignore's directory; strip it
+      const hasLeadingSlash = noTrailing.startsWith("/");
+      const clean = hasLeadingSlash ? noTrailing.slice(1) : noTrailing;
+
+      // Anchored if explicit leading slash or interior slash present
+      const isAnchored = hasLeadingSlash || clean.includes("/");
+
+      // Escape regex special chars, then handle glob wildcards
       const escaped = clean
         .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-        .replace(/\*/g, ".*")
-        .replace(/\?/g, ".");
-      return new RegExp(`(^|/)${escapedPrefix}${escaped}(/|$)`);
+        .replace(/\*\*/g, "\x00")   // placeholder so ** isn't touched by next replace
+        .replace(/\*/g, "[^/]*")    // * must not cross directory boundaries
+        .replace(/\?/g, "[^/]")     // ? must not cross directory boundaries
+        .replace(/\x00/g, ".*");    // ** crosses directory boundaries
+
+      if (isAnchored) {
+        return new RegExp(`^${escapedPrefix}${escaped}(/|$)`);
+      } else if (escapedPrefix) {
+        return new RegExp(`^${escapedPrefix}(.*/)?${escaped}(/|$)`);
+      } else {
+        return new RegExp(`(^|/)${escaped}(/|$)`);
+      }
     });
 }
 

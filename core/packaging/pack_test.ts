@@ -178,6 +178,101 @@ test(".env files are always excluded from pack", async () => {
   }
 });
 
+test("subdirectory .gitignore with leading-slash pattern excludes correctly", async () => {
+  // /node_modules/ in a subdir's .gitignore should exclude subdir/node_modules/
+  // This was broken before the fix — leading slash created a // double-slash regex
+  const srcDir = await makeTempDir();
+  const destDir = await makeTempDir();
+  try {
+    await mkdir(join(srcDir, "frontend"), { recursive: true });
+    await writeFile(join(srcDir, "frontend", ".gitignore"), "/node_modules/\n/build/\n");
+    await writeFile(join(srcDir, "frontend", "app.ts"), "export {}");
+    await mkdir(join(srcDir, "frontend", "node_modules", "lodash"), { recursive: true });
+    await writeFile(join(srcDir, "frontend", "node_modules", "lodash", "index.js"), "module.exports = {};");
+    await mkdir(join(srcDir, "frontend", "build"), { recursive: true });
+    await writeFile(join(srcDir, "frontend", "build", "bundle.js"), "bundled");
+
+    const { ciphertext, iv, aesKeyRaw } = await packDirectory(srcDir);
+    await unpackToDirectory(ciphertext, aesKeyRaw, iv, destDir);
+
+    const app = await readFile(join(destDir, "frontend", "app.ts"), "utf-8");
+    expect(app).toEqual("export {}");
+
+    let nmExists = false;
+    try { await stat(join(destDir, "frontend", "node_modules")); nmExists = true; } catch { /* expected */ }
+    expect(nmExists).toEqual(false);
+
+    let buildExists = false;
+    try { await stat(join(destDir, "frontend", "build")); buildExists = true; } catch { /* expected */ }
+    expect(buildExists).toEqual(false);
+  } finally {
+    await cleanup(srcDir);
+    await cleanup(destDir);
+  }
+});
+
+test("subdirectory .gitignore unanchored pattern matches at any depth", async () => {
+  // `venv/` (no leading slash) should exclude backend/venv/ and backend/sub/venv/
+  const srcDir = await makeTempDir();
+  const destDir = await makeTempDir();
+  try {
+    await mkdir(join(srcDir, "backend"), { recursive: true });
+    await writeFile(join(srcDir, "backend", ".gitignore"), "venv/\n*.log\n");
+    await writeFile(join(srcDir, "backend", "main.py"), "print('hello')");
+    await mkdir(join(srcDir, "backend", "venv", "lib"), { recursive: true });
+    await writeFile(join(srcDir, "backend", "venv", "lib", "site.py"), "site");
+    await writeFile(join(srcDir, "backend", "server.log"), "log content");
+
+    const { ciphertext, iv, aesKeyRaw } = await packDirectory(srcDir);
+    await unpackToDirectory(ciphertext, aesKeyRaw, iv, destDir);
+
+    const main = await readFile(join(destDir, "backend", "main.py"), "utf-8");
+    expect(main).toEqual("print('hello')");
+
+    let venvExists = false;
+    try { await stat(join(destDir, "backend", "venv")); venvExists = true; } catch { /* expected */ }
+    expect(venvExists).toEqual(false);
+
+    let logExists = false;
+    try { await stat(join(destDir, "backend", "server.log")); logExists = true; } catch { /* expected */ }
+    expect(logExists).toEqual(false);
+  } finally {
+    await cleanup(srcDir);
+    await cleanup(destDir);
+  }
+});
+
+test("glob * does not cross directory boundaries", async () => {
+  // *.log should match foo.log but NOT logs/foo.log (without explicit logs/ pattern)
+  const srcDir = await makeTempDir();
+  const destDir = await makeTempDir();
+  try {
+    await writeFile(join(srcDir, ".gitignore"), "*.log\n");
+    await writeFile(join(srcDir, "app.ts"), "code");
+    await writeFile(join(srcDir, "error.log"), "excluded");
+    await mkdir(join(srcDir, "logs"), { recursive: true });
+    await writeFile(join(srcDir, "logs", "server.log"), "also excluded");
+
+    const { ciphertext, iv, aesKeyRaw } = await packDirectory(srcDir);
+    await unpackToDirectory(ciphertext, aesKeyRaw, iv, destDir);
+
+    const app = await readFile(join(destDir, "app.ts"), "utf-8");
+    expect(app).toEqual("code");
+
+    let logExists = false;
+    try { await stat(join(destDir, "error.log")); logExists = true; } catch { /* expected */ }
+    expect(logExists).toEqual(false);
+
+    // logs/server.log is also matched because *.log is unanchored and matches at any depth
+    let nestedLogExists = false;
+    try { await stat(join(destDir, "logs", "server.log")); nestedLogExists = true; } catch { /* expected */ }
+    expect(nestedLogExists).toEqual(false);
+  } finally {
+    await cleanup(srcDir);
+    await cleanup(destDir);
+  }
+});
+
 test("packDirectory on empty directory returns valid (non-empty) result", async () => {
   const dir = await makeTempDir();
   try {
