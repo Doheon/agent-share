@@ -262,13 +262,15 @@ function ChatApp({
 
   // Setup swarm listeners
   useEffect(() => {
-    const unsubConnect = swarm.onConnect(() => {
+    const unsubConnect = swarm.onConnect(async () => {
       setPeerCount(swarm.getPeers().length);
+      const ledgerCoreKey = await getLedgerCoreKey(userId).catch(() => undefined);
       swarm.broadcast({
         type: "peer:info",
         pubkey: userId,
         username,
         model_tier: currentModelRef.current,
+        ledger_core_key: ledgerCoreKey,
       });
     });
     const unsubDisconnect = swarm.onDisconnect(() => setPeerCount(swarm.getPeers().length));
