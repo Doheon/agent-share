@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      - run: npm test
+
+      # Verify tag version matches package.json and CLIENT_VERSION
+      - name: Verify versions
+        run: |
+          TAG=${GITHUB_REF_NAME#v}
+          PKG=$(node -p "require('./package.json').version")
+          CLIENT=$(grep 'CLIENT_VERSION' shared/protocol.ts | grep -oP '"\K[^"]+')
+          if [ "$TAG" != "$PKG" ]; then
+            echo "error: tag $TAG != package.json $PKG"
+            exit 1
+          fi
+          if [ "$TAG" != "$CLIENT" ]; then
+            echo "error: tag $TAG != CLIENT_VERSION $CLIENT"
+            exit 1
+          fi
+          echo "VERSION=$TAG" >> $GITHUB_ENV
+
+      # Pack locally to get sha256 before publishing
+      - name: Pack and compute sha256
+        run: |
+          npm pack
+          TARBALL=$(ls *.tgz)
+          SHA256=$(sha256sum $TARBALL | awk '{print $1}')
+          echo "SHA256=$SHA256" >> $GITHUB_ENV
+
+      - name: Publish to npm
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "ash $GITHUB_REF_NAME" \
+            --generate-notes
+
+      - name: Update Homebrew formula
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          git clone https://x-access-token:${TAP_TOKEN}@github.com/Doheon/homebrew-tap.git
+          cd homebrew-tap
+          sed -i "s|url \".*\"|url \"https://registry.npmjs.org/@doheon/ash/-/ash-${VERSION}.tgz\"|" Formula/ash.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" Formula/ash.rb
+          git config user.email "github-actions@github.com"
+          git config user.name "github-actions"
+          git add Formula/ash.rb
+          git commit -m "chore: update ash to v${VERSION}"
+          git push
