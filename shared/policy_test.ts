@@ -7,17 +7,11 @@ import {
   FEE_BPS,
   MODELS,
   MODEL_CREDITS,
-  POLICY_VERSION,
   SIGNUP_BONUS,
   splitFee,
 } from "./policy.ts";
 
 describe("policy constants", () => {
-  test("POLICY_VERSION is a positive integer", () => {
-    expect(Number.isInteger(POLICY_VERSION)).toBe(true);
-    expect(POLICY_VERSION).toBeGreaterThan(0);
-  });
-
   test("SIGNUP_BONUS is a non-negative integer", () => {
     expect(Number.isInteger(SIGNUP_BONUS)).toBe(true);
     expect(SIGNUP_BONUS).toBeGreaterThanOrEqual(0);

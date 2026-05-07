@@ -2,7 +2,7 @@
  * Policy constants — single source of truth for economic parameters.
  *
  * Changing any value here is a minor-release event:
- *   - Bump POLICY_VERSION.
+ *   - Bump CLIENT_VERSION in shared/protocol.ts.
  *   - Bump the package minor (e.g. 0.1.x -> 0.2.0).
  *
  * Credit issuance rule: the only ways credit enters a user's balance are
@@ -13,8 +13,6 @@
  */
 import { ADMIN_PUBKEY } from "./constants.ts";
 import type { Model } from "./types.ts";
-
-export const POLICY_VERSION = 2 as const;
 
 /** Credits issued to a new user via an admin-signed `mint` with reason "signup". */
 export const SIGNUP_BONUS = 100;

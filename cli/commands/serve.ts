@@ -34,6 +34,7 @@ import {
 import { ensureInitialized, NotInitializedError } from "../guard.ts";
 import { modelToAgent } from "../../shared/types.ts";
 import { MODEL_CREDITS, splitFee } from "../../shared/policy.ts";
+import { CLIENT_VERSION } from "../../shared/protocol.ts";
 import { AshSwarm, type SwarmPeer } from "../../core/p2p/swarm.ts";
 import type { P2PMessage } from "../../core/p2p/messages.ts";
 import {
@@ -86,6 +87,15 @@ function stopSpin(): void {
 export class AuthError extends Error {}
 const AUTH_PATTERNS = [/not (logged in|authenticated)/i, /invalid.?api.?key/i, /\b401\b/, /\bunauthorized\b/i];
 const isAuthLine = (s: string) => AUTH_PATTERNS.some((p) => p.test(s));
+
+function semverGt(a: string, b: string): boolean {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0);
+  }
+  return false;
+}
 
 export interface ActiveTask {
   taskId: string;
@@ -587,6 +597,16 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
     if (msg.requester_pubkey !== peer.pubkey) return; // reject spoofed requester identity
     if (msg.requester_pubkey === myPub && !opts.allowSelf) return;
     if (msg.model !== opts.modelTier) return;
+
+    const expectedCost = MODEL_CREDITS[msg.model] ?? 0;
+    if (msg.credit_cost !== undefined && msg.credit_cost !== expectedCost) {
+      const theirVer = peer.app_version ?? "unknown";
+      const myVer = CLIENT_VERSION;
+      const needsUpdate = semverGt(myVer, theirVer) ? `requester (${theirVer})` : `acceptor (${myVer})`;
+      out(`  ${D}skip: price mismatch — requester expects ${msg.credit_cost}cr, we require ${expectedCost}cr · ${needsUpdate} needs update${R}\n`);
+      peer.send({ type: "task:price_mismatch", task_id: msg.task_id, acceptor_app_version: myVer, expected_cost: expectedCost });
+      return;
+    }
 
     if (!msg.requester_ledger_key) {
       out(`  ${D}skip: ${msg.requester_pubkey.slice(0, 8)} missing ledger key${R}\n`);

@@ -169,6 +169,15 @@ function ConnectingBanner(): React.ReactElement {
   );
 }
 
+function semverGt(a: string, b: string): boolean {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0);
+  }
+  return false;
+}
+
 function ChatApp({
   userId, username, edPriv, models, initialModel, initialBalance, initialServed, swarm, absDir,
 }: ChatProps) {
@@ -408,6 +417,20 @@ function ChatApp({
       const p = pendingRef.current;
       if (!p) return;
       switch (msg.type) {
+        case "task:price_mismatch": {
+          if (msg.task_id !== p.taskId) return;
+          const myVer = CLIENT_VERSION;
+          const theirVer = msg.acceptor_app_version;
+          const whoUpdates = semverGt(theirVer, myVer)
+            ? `update ash to v${theirVer} (run: npm i -g @doheon/ash)`
+            : `acceptor is on an older version (${theirVer}) — ask them to update`;
+          addMsg(
+            `  ⎿ price mismatch · acceptor requires ${msg.expected_cost}cr, you offered ${p.cost}cr · ${whoUpdates}`,
+            "#e3bd5a",
+          );
+          finish();
+          return;
+        }
         case "task:claim":
           if (msg.task_id !== p.taskId) return;
           if (p.acceptorPeer) return;
@@ -502,6 +525,15 @@ function ChatApp({
     const cost = creditsFor(currentModelRef.current);
     const fullPrompt = buildPromptWithHistory(prompt);
 
+    const { balance: currentBalance } = await getLocalBalance(userId);
+    if (currentBalance < cost) {
+      addMsg(
+        `  ⎿ not enough credits · need ${cost}cr for ${currentModelRef.current} · have ${currentBalance}cr · run /mine to earn more`,
+        "#e3bd5a",
+      );
+      return;
+    }
+
     if (swarm.getPeers().length === 0) {
       addMsg("  ⎿ no peers connected; nobody can accept your task.", "#e3bd5a");
       return;
@@ -554,6 +586,7 @@ function ChatApp({
       rsa_public_key: myRsaPubPem,
       timestamp: new Date().toISOString(),
       requester_ledger_key: requesterLedgerKey,
+      credit_cost: cost,
     };
     swarm.broadcast(announce);
     addMsg(`  ⎿ announced  (${taskId.slice(0, 8)})`, "#6b6b6b");

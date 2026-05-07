@@ -18,6 +18,7 @@ export function isValidId(id: unknown): id is string {
 const TASK_ID_TYPES = new Set([
   "task:announce", "task:claim", "task:match", "task:blob_request",
   "task:blob", "task:diff", "task:settle", "task:cancel", "task:log",
+  "task:price_mismatch",
   "spend:cosign", "earn:cosign", "mine:claim",
 ]);
 
@@ -107,6 +108,8 @@ export type P2PMessage =
       sig: string;    // Ed25519 signature over (nonce || theirTransport || ourTransport)
       /** Wire protocol version. Peers refuse mismatched majors at handshake. */
       protocol_version: number;
+      /** Semver app version — used to detect pricing policy mismatches. */
+      app_version?: string;
     }
   | {
       type: "peer:info";
@@ -127,6 +130,16 @@ export type P2PMessage =
       timestamp: string;
       /** Hex key of the requester's event Hypercore — used by acceptors to verify balance. */
       requester_ledger_key?: string;
+      /** Credit cost the requester expects to pay — acceptors reject if it differs from their policy. */
+      credit_cost: number;
+    }
+  | {
+      type: "task:price_mismatch";
+      task_id: string;
+      /** Acceptor's semver app version. */
+      acceptor_app_version: string;
+      /** Credit cost the acceptor's policy requires for this model. */
+      expected_cost: number;
     }
   | {
       type: "task:claim";

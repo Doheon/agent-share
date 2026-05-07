@@ -17,7 +17,7 @@ import { rmSync } from "node:fs";
 import type { KeyObject } from "node:crypto";
 import type { P2PMessage } from "./messages.ts";
 import { isValidMessage } from "./messages.ts";
-import { PROTOCOL_VERSION } from "../../shared/protocol.ts";
+import { CLIENT_VERSION, PROTOCOL_VERSION } from "../../shared/protocol.ts";
 import {
   signEd25519,
   verifyEd25519,
@@ -47,6 +47,8 @@ export interface SwarmPeer {
   id: string;
   /** Ed25519 identity key (hex), verified via challenge/response at connection time. */
   pubkey: string;
+  /** Semver app version advertised in peer:hello — used for update nudges. */
+  app_version?: string;
   send: (msg: P2PMessage) => void;
 }
 
@@ -144,6 +146,7 @@ export class AshSwarm {
 
     // Per-connection handshake state.
     let verifiedPubkey: string | null = null;
+    let peerAppVersion: string | undefined;
     let sentHello = false;
     let handshakeDone = false;
     const buffered: P2PMessage[] = [];
@@ -224,7 +227,7 @@ export class AshSwarm {
       if (existingPeer) {
         existingPeer.send = sendFn;
       } else {
-        const peer: SwarmPeer = { id, pubkey: verifiedPubkey, send: sendFn };
+        const peer: SwarmPeer = { id, pubkey: verifiedPubkey, app_version: peerAppVersion, send: sendFn };
         this.peers.set(id, peer);
         for (const h of this.connectHandlers) h(peer);
       }
@@ -274,6 +277,7 @@ export class AshSwarm {
                 pubkey: this.pubKeyHex,
                 sig,
                 protocol_version: PROTOCOL_VERSION,
+                app_version: CLIENT_VERSION,
               }) + "\n",
             );
           } catch (err) {
@@ -306,6 +310,7 @@ export class AshSwarm {
               return;
             }
             verifiedPubkey = theirPubkey;
+            peerAppVersion = typeof raw.app_version === "string" ? raw.app_version : undefined;
             completeHandshake();
           } catch (err) {
             debugLog(`[swarm] peer:hello verification error from ${id.slice(0, 16)}:`, (err as Error).message);
