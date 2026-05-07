@@ -2,10 +2,14 @@ import { describe, it, expect, vi } from "vitest";
 import { generateEd25519KeyPair, publicKeyToRawHex, signEd25519 } from "../crypto/ed25519.ts";
 
 // Hoisted so the mock factory below can close over the admin identity.
+// Uses only node:crypto (no .ts require) so vi.hoisted works before vitest's
+// TypeScript transformer is active.
 const admin = vi.hoisted(() => {
-  const { generateEd25519KeyPair: gen, publicKeyToRawHex: pubHex } = require("../crypto/ed25519.ts") as typeof import("../crypto/ed25519.ts");
-  const { privateKey, publicKey } = gen();
-  return { priv: privateKey, pubHex: pubHex(publicKey) };
+  const crypto = require("node:crypto");
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("ed25519");
+  const jwk = publicKey.export({ format: "jwk" });
+  const pubHex = Buffer.from(jwk.x, "base64url").toString("hex");
+  return { priv: privateKey, pubHex };
 });
 
 vi.mock("./store.ts", () => {
