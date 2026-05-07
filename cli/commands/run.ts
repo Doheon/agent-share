@@ -77,6 +77,27 @@ export const runCommand = new Command("run")
     if (!models.find((m) => m.tier === modelTier)) modelTier = DEFAULT_MODEL_TIER;
     const cost = models.find((m) => m.tier === modelTier)?.credits ?? 15;
 
+    // Brief LEDGER_TOPIC join to pull admin/counterparty core blocks so
+    // getSpendableBalance sees the real balance on cold cache.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let prefetchSwarm: any = null;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { default: Hyperswarm } = (await import("hyperswarm")) as any;
+      prefetchSwarm = new Hyperswarm();
+      const prefetchStore = await getCorestore();
+      if (ADMIN_LEDGER_KEY) {
+        const ac = prefetchStore.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
+        await ac.ready().catch(() => {});
+      }
+      prefetchSwarm.join(LEDGER_TOPIC);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      prefetchSwarm.on("connection", (conn: any) => prefetchStore.replicate(conn));
+      await Promise.race([prefetchSwarm.flush(), new Promise<void>((r) => setTimeout(r, 5000))]);
+      await new Promise<void>((r) => setTimeout(r, 2000));
+    } catch { /* non-fatal */ }
+    await prefetchSwarm?.destroy().catch(() => {});
+
     // Pre-flight balance check using the spendable view (replayed minus
     // any in-flight reservations from concurrent flows in this process).
     // Without this, two concurrent `ash run` invocations could each see

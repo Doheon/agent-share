@@ -1494,9 +1494,6 @@ export async function runChat(opts: { model?: string } = {}): Promise<void> {
     process.exit(code);
   };
 
-  const initialBalance = (await getLocalBalance(userId)).balance;
-  const initialServed = (await getEvents(userId)).filter((e) => e.type === "earn").length;
-
   const swarm = new AshSwarm();
   // Render a banner WHILE swarm.join runs. exitOnCtrlC=true so the user
   // can abort a stuck cold-start without leaving the terminal hostile.
@@ -1531,6 +1528,17 @@ export async function runChat(opts: { model?: string } = {}): Promise<void> {
       console.error("[ash] ledger replication swarm failed to start:", (err as Error).message);
     }
   }
+
+  // Wait for repSwarm peers to connect so download() in getLocalBalance has a
+  // peer to pull blocks from. ConnectingBanner is still visible during this wait.
+  if (repSwarm) {
+    try {
+      await Promise.race([repSwarm.flush(), new Promise<void>((r) => setTimeout(r, 5000))]);
+      await new Promise<void>((r) => setTimeout(r, 2000));
+    } catch { /* non-fatal */ }
+  }
+  const initialBalance = (await getLocalBalance(userId)).balance;
+  const initialServed = (await getEvents(userId)).filter((e) => e.type === "earn").length;
 
   banner.unmount();
 

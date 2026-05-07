@@ -16,6 +16,8 @@ import { peersCommand } from "./commands/peers.ts";
 import { hasIdentity, loadConfig, loadModelTier } from "./client.ts";
 import { ensureInitialized, NotInitializedError } from "./guard.ts";
 import { getLocalBalance, closeLocalStore } from "./p2p_state.ts";
+import { getCorestore } from "../core/ledger/store.ts";
+import { LEDGER_TOPIC, ADMIN_LEDGER_KEY } from "../shared/constants.ts";
 import { CLIENT_VERSION } from "../shared/protocol.ts";
 import { getAgentStatus, type AgentStatus } from "./commands/init.ts";
 import { modelToAgent } from "../shared/types.ts";
@@ -56,6 +58,8 @@ program.addCommand(
   new Command("status")
     .description("Show local identity and credit balance")
     .action(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let repSwarm: any = null;
       try {
         if (!(await hasIdentity())) {
           console.log("\n  not initialized.  Run: ash init\n");
@@ -66,6 +70,21 @@ program.addCommand(
           console.log("\n  identity exists but no username.  Run: ash init\n");
           return;
         }
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const { default: Hyperswarm } = (await import("hyperswarm")) as any;
+          repSwarm = new Hyperswarm();
+          const store = await getCorestore();
+          if (ADMIN_LEDGER_KEY) {
+            const ac = store.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
+            await ac.ready().catch(() => {});
+          }
+          repSwarm.join(LEDGER_TOPIC);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          repSwarm.on("connection", (conn: any) => store.replicate(conn));
+          await Promise.race([repSwarm.flush(), new Promise<void>((r) => setTimeout(r, 5000))]);
+          await new Promise<void>((r) => setTimeout(r, 2000));
+        } catch { /* non-fatal — offline status still works */ }
         const balance = await getLocalBalance(cfg.pubkey);
         const modelTier = await loadModelTier();
         // Probe only the agent the user actually configured. Probing both
@@ -87,6 +106,7 @@ program.addCommand(
         console.error(`\nerror: ${(err as Error).message}\n`);
         process.exit(1);
       } finally {
+        await repSwarm?.destroy().catch(() => {});
         await closeLocalStore().catch(() => undefined);
       }
     }),

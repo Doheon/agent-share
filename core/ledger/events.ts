@@ -243,11 +243,18 @@ async function verifyEarnCrossRef(
         const store = await getCorestore();
         cpCore = store.get(Buffer.from(mappedKey, "hex"), { valueEncoding: "utf-8" });
         await cpCore.ready();
-        // Give replication a brief window to catch up before we read.
+        // Sync merkle tree then download actual blocks so { wait: false } reads succeed.
         await Promise.race([
           Promise.resolve(cpCore.update?.()).catch(() => undefined),
           new Promise<void>((r) => setTimeout(r, 2000)),
         ]);
+        if (cpCore.length > 0) {
+          try {
+            const dl = cpCore.download({ start: 0, end: cpCore.length });
+            await Promise.race([dl.done(), new Promise<void>((r) => setTimeout(r, 3000))]);
+            dl.destroy?.();
+          } catch { /* non-fatal */ }
+        }
       } else {
         cpCore = await getUserCore(earn.counterparty_pubkey);
       }
@@ -315,6 +322,13 @@ async function replayAdminMints(recipientPubkey: string): Promise<number> {
       adminCore.update?.().catch(() => undefined),
       new Promise<void>((r) => setTimeout(r, 8000)),
     ]);
+    if (adminCore.length > 0) {
+      try {
+        const dl = adminCore.download({ start: 0, end: adminCore.length });
+        await Promise.race([dl.done(), new Promise<void>((r) => setTimeout(r, 5000))]);
+        dl.destroy?.();
+      } catch { /* non-fatal */ }
+    }
     if (adminCore.length === 0) return 0;
     const adminPubKey = rawHexToPublicKey(ADMIN_PUBKEY);
     let total = 0;
@@ -422,6 +436,13 @@ export async function getAdminMintsFor(recipientPubkey: string): Promise<Event[]
       adminCore.update?.().catch(() => undefined),
       new Promise<void>((r) => setTimeout(r, 8000)),
     ]);
+    if (adminCore.length > 0) {
+      try {
+        const dl = adminCore.download({ start: 0, end: adminCore.length });
+        await Promise.race([dl.done(), new Promise<void>((r) => setTimeout(r, 5000))]);
+        dl.destroy?.();
+      } catch { /* non-fatal */ }
+    }
     if (adminCore.length === 0) return [];
     const adminPubKey = rawHexToPublicKey(ADMIN_PUBKEY);
     const mints: Event[] = [];
