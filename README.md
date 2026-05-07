@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Runtime: Node.js](https://img.shields.io/badge/Runtime-Node.js-green)](https://nodejs.org)
 
-<!-- GIF HERE -->
+<img width="500" alt="ash_request" src="https://github.com/user-attachments/assets/b7ab2076-4f1b-44bc-9bd6-e4bce2c43f07" />
 
 **ash** is a peer-to-peer network where anyone can earn AI credits by running tasks for others, then spend those credits to get their own code written — no subscription, no central server.
 
