@@ -61,6 +61,6 @@
     "@hyperswarm/testnet": "^3.1.4",
     "@types/node": "^22",
     "@types/react": "^19",
-    "vitest": "latest"
+    "vitest": "4.1.4"
   }
 }
