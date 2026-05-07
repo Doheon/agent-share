@@ -47,7 +47,7 @@ import {
 } from "../p2p_state.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
 import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
-import { LEDGER_TOPIC } from "../../shared/constants.ts";
+import { LEDGER_TOPIC, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
 import { signEd25519, verifyEd25519, rawHexToPublicKey } from "../../core/crypto/ed25519.ts";
 // signEd25519 is used in the cosigner-side mine:claim handler (~line 506);
 // kept here so the cosign signing path doesn't have to re-import it.
@@ -434,6 +434,14 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
     const repSwarm = new Hyperswarm();
     replicationSwarm = repSwarm;
     const store = await getCorestore();
+    // Open admin core so Corestore announces it in every replication session.
+    // Without this, doheon2 requesting the admin core by key gets no response
+    // even though the blocks exist on disk — Corestore only advertises cores
+    // that are currently open in memory.
+    if (ADMIN_LEDGER_KEY) {
+      const ac = store.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
+      await ac.ready().catch(() => {});
+    }
     repSwarm.join(LEDGER_TOPIC);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     repSwarm.on("connection", (conn: any) => store.replicate(conn));

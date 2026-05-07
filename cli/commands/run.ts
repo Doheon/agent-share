@@ -42,7 +42,7 @@ import {
   getSpendableBalance,
 } from "../p2p_state.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
-import { LEDGER_TOPIC } from "../../shared/constants.ts";
+import { LEDGER_TOPIC, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
 import { AshSwarm, type SwarmPeer } from "../../core/p2p/swarm.ts";
 import type { P2PMessage } from "../../core/p2p/messages.ts";
 import { sanitizeLogLine } from "../../core/p2p/messages.ts";
@@ -113,6 +113,10 @@ export const runCommand = new Command("run")
       const { default: Hyperswarm } = (await import("hyperswarm")) as any;
       repSwarm = new Hyperswarm();
       const store = await getCorestore();
+      if (ADMIN_LEDGER_KEY) {
+        const ac = store.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
+        await ac.ready().catch(() => {});
+      }
       repSwarm.join(LEDGER_TOPIC);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       repSwarm.on("connection", (conn: any) => store.replicate(conn));
