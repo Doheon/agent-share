@@ -15,7 +15,7 @@ RUN apk add --no-cache git curl bash nodejs npm && \
 
 # Install latest AI agents — image tag is a hash of this file so any change
 # here automatically invalidates the cached image and triggers a rebuild.
-RUN npm install -g --ignore-scripts --no-fund --no-audit \
+RUN npm install -g --no-fund --no-audit \
     @anthropic-ai/claude-code \
     @openai/codex
 
