@@ -950,8 +950,8 @@ function ChatApp({
       return;
     }
     if (!input.startsWith("/")) { await runRequest(input); return; }
-    addMsg(`❯ ${input}`, "#555555");
     const [cmd, ...args] = input.slice(1).trim().split(/\s+/);
+    if (cmd.toLowerCase() !== "clear") addMsg(`❯ ${input}`, "#555555");
     switch (cmd.toLowerCase()) {
       case "q": case "quit": case "exit": doExit(); break;
       case "": case "help":
@@ -1048,6 +1048,8 @@ function ChatApp({
       }
       case "clear":
         setMsgs([]);
+        setTurns([]);
+        turnsRef.current = [];
         break;
       case "status": {
         const [{ balance: b }, cfg, claudeStatus, codexStatus] = await Promise.all([
