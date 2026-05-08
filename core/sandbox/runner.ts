@@ -39,7 +39,7 @@ export const CODEX_LAST_MESSAGE_FILE = ".ash_last.md";
 
 export function buildAgentCommand(agent: AgentType): string {
   if (agent === "claude") {
-    return `export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/agent-token)" && claude --dangerously-skip-permissions < /task/prompt.txt`;
+    return `export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/agent-token)" && unbuffer claude --dangerously-skip-permissions < /task/prompt.txt`;
   }
   return `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --output-last-message /workspace/${CODEX_LAST_MESSAGE_FILE} < /task/prompt.txt`;
 }
@@ -102,7 +102,7 @@ export async function runAgentInSandbox(opts: SandboxOptions): Promise<RunResult
     : [];
 
   const args: string[] = [
-    "run", "--rm", "--tty",
+    "run", "--rm",
     `--network=${networkMode(runtime, allowedHosts.length > 0)}`,
     // `:Z` (uppercase) gives a private SELinux label per container —
     // lowercase `:z` would relabel the host file as shared-content,

@@ -10,7 +10,7 @@ const IMAGE_NAME = "agent-share-sandbox";
 const CONTAINERFILE = `
 FROM alpine:3.19
 
-RUN apk add --no-cache git curl bash nodejs npm && \
+RUN apk add --no-cache git curl bash nodejs npm expect && \
     apk upgrade --no-cache
 
 # Install latest AI agents — image tag is a hash of this file so any change
