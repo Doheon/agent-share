@@ -237,7 +237,7 @@ function ChatApp({
       + `### Turn ${i + 1}\nUser: ${t.prompt}\n\nAgent output:\n${t.agentOutput || "(no output)"}\n\nResult: ...\n\n`.length
       + (t.diff ? t.diff.length + 30 : 0), 0)
       + "## Previous conversation in this session\n\n## Current turn\n".length;
-    return Math.min(99, Math.round(size / MAX_PROMPT_SIZE * 100));
+    return Math.min(99, Math.ceil(size / MAX_PROMPT_SIZE * 100));
   }, [turns]);
 
   const pendingRef = useRef<PendingTask | null>(null);
@@ -1078,8 +1078,7 @@ function ChatApp({
         break;
       }
       case "clear":
-        process.stdout.write("\x1b[2J\x1b[0f");
-        setMsgs([]);
+        setMsgs([{ id: nextId(), text: "  type /help for commands · /quit to exit", color: "#555555" }]);
         setTurns([]);
         turnsRef.current = [];
         break;
@@ -1357,8 +1356,9 @@ function ChatApp({
 
   const { setCursorPosition } = useCursor();
 
-  const committedMsgs = msgs.length > 0 ? msgs.slice(0, -1) : [];
-  const pendingMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+  // Show only as many messages as fit on screen; the rest silently drop out
+  // of the visible area without corrupting Ink's cursor tracking.
+  const visibleMsgs = msgs.slice(-Math.max(1, termHeight - 8));
 
   const statusDir = process.cwd().replace(homedir(), "~");
   const statusDirShort = statusDir.length > 40 ? "…" + statusDir.slice(-39) : statusDir;
@@ -1379,56 +1379,46 @@ function ChatApp({
   // Header is the first Static item, so y is relative to the dynamic area only.
   // Dynamic area layout (0-indexed):
   //   pendingMsg (0-1) + separator(1) + input ← cursor here + separator(1) + menu/picker + status
-  const pendingLines = pendingMsg ? 1 : 0;
+  const inflightLines = inflightStatus ? 1 : 0;
   if (!serveDisplay && !loginActive) {
-    setCursorPosition({ x: 3 + cursorCol, y: pendingLines + 1 + cursorRow });
+    setCursorPosition({ x: 3 + cursorCol, y: visibleMsgs.length + inflightLines + 1 + cursorRow });
   } else {
     setCursorPosition({ x: 0, y: 0 });
   }
 
-  // Single Static items array — header first, then committed messages.
-  // Matches Claude Code's pattern (see sourcemap REPL.tsx: messagesJSX = [logo, ...messages]).
-  type StaticItem = { kind: "header" } | { kind: "msg"; msg: MsgLine };
-  const staticItems: StaticItem[] = [
-    { kind: "header" },
-    ...committedMsgs.map((msg) => ({ kind: "msg" as const, msg })),
-  ];
+  // Static section holds only the header — messages live in the dynamic
+  // section so /clear can wipe them without writing raw escape codes that
+  // confuse Ink's cursor tracking.
+  type StaticItem = { kind: "header" };
+  const staticItems: StaticItem[] = [{ kind: "header" }];
 
   return (
     <>
       <Static items={staticItems}>
-        {(item) => {
-          if (item.kind === "header") {
-            return (
-              <Box key="__header__" flexDirection="column" marginBottom={1}>
-                <Box paddingLeft={MX}>
-                  <Text color={SIG}>{topLine}</Text>
-                </Box>
-                <Box marginX={MX} width={boxW} borderStyle={heavyBorder} borderTop={false} borderColor={SIG} paddingX={2} paddingY={0}>
-                  <Box flexDirection="column">
-                    <Text><Text color={SIG}>{"◆ ash"}</Text><Text color="#aaaaaa">{"  P2P agent share"}</Text></Text>
-                    <Text><Text color="#888888">{"username: "}</Text><Text color="#cccccc">{username}</Text></Text>
-                    <Text><Text color="#888888">{"directory: "}</Text><Text color="#cccccc">{statusDirShort}</Text></Text>
-                  </Box>
-                </Box>
-              </Box>
-            );
-          }
-          return (
-            <Box key={item.msg.id} paddingX={1}>
-              <Text color={item.msg.color}>{item.msg.text}</Text>
+        {(item) => (
+          <Box key="__header__" flexDirection="column" marginBottom={1}>
+            <Box paddingLeft={MX}>
+              <Text color={SIG}>{topLine}</Text>
             </Box>
-          );
-        }}
+            <Box marginX={MX} width={boxW} borderStyle={heavyBorder} borderTop={false} borderColor={SIG} paddingX={2} paddingY={0}>
+              <Box flexDirection="column">
+                <Text><Text color={SIG}>{"◆ ash"}</Text><Text color="#aaaaaa">{"  P2P agent share"}</Text></Text>
+                <Text><Text color="#888888">{"username: "}</Text><Text color="#cccccc">{username}</Text></Text>
+                <Text><Text color="#888888">{"directory: "}</Text><Text color="#cccccc">{statusDirShort}</Text></Text>
+              </Box>
+            </Box>
+          </Box>
+        )}
       </Static>
 
       <Box flexDirection="column">
-        {/* Pending (last) message — dynamic, can be updated in place. */}
-        {pendingMsg && (
-          <Box paddingX={1}>
-            <Text color={pendingMsg.color}>{pendingMsg.text}</Text>
+        {/* Visible messages — last N that fit on screen. All in the dynamic
+            section so /clear can reset them without raw escape codes. */}
+        {visibleMsgs.map((msg) => (
+          <Box key={msg.id} paddingX={1}>
+            <Text color={msg.color}>{msg.text}</Text>
           </Box>
-        )}
+        ))}
 
         {/* In-flight task heartbeat: spinner + elapsed time + line count. */}
         {inflightStatus && (() => {
