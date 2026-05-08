@@ -196,6 +196,15 @@ function ChatApp({
 
   const [spinFrame, setSpinFrame] = useState(0);
 
+  const ctxPct = React.useMemo(() => {
+    if (turns.length === 0) return 0;
+    const size = turns.reduce((acc, t, i) => acc
+      + `### Turn ${i + 1}\nUser: ${t.prompt}\n\nAgent output:\n${t.agentOutput || "(no output)"}\n\nResult: ...\n\n`.length
+      + (t.diff ? t.diff.length + 30 : 0), 0)
+      + "## Previous conversation in this session\n\n## Current turn\n".length;
+    return Math.min(99, Math.round(size / 32768 * 100));
+  }, [turns]);
+
   const pendingRef = useRef<PendingTask | null>(null);
   const confirmResolveRef = useRef<((apply: boolean) => void) | null>(null);
   const currentModelRef = useRef(initialModel);
@@ -1513,6 +1522,8 @@ function ChatApp({
             <Text color="#7cd38a">{syncing ? "…" : String(served)}</Text>
             <Text color="#555555">{"  turn: "}</Text>
             <Text color="#cccccc">{turns.length}</Text>
+            <Text color="#555555">{"  ctx: "}</Text>
+            <Text color={ctxPct >= 80 ? "#ff8888" : ctxPct >= 50 ? "#e3bd5a" : "#7cd38a"}>{ctxPct}%</Text>
             <Text color="#555555">{"  peers: "}</Text>
             <Text color="#cccccc">{peerCount}</Text>
           </Text>
