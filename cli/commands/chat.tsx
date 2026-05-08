@@ -774,7 +774,7 @@ function ChatApp({
           if (lines.length > 0) {
             updateLastMsg(lines[0]);
             if (lines.length > 1) {
-              addMsgs(lines.slice(1).map((l) => ({ id: nextId(), text: l, color: "" })));
+              addMsgs(lines.slice(1));
             }
           }
         }
