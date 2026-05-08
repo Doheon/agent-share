@@ -223,7 +223,6 @@ function ChatApp({
   const [inflightStatus, setInflightStatus] = useState<{
     startTs: number;
     acceptorPubkey: string;
-    lineCount: number;
   } | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const turnsRef = useRef<Turn[]>([]);
@@ -747,7 +746,6 @@ function ChatApp({
           setInflightStatus({
             startTs: Date.now(),
             acceptorPubkey: pendingRef.current?.acceptorPubkey ?? peer.pubkey,
-            lineCount: 0,
           });
         } catch (err) {
           addMsg(`  ⎿ match failed: ${(err as Error).message}`, "#ff8888");
@@ -756,10 +754,11 @@ function ChatApp({
       };
 
       pendingRef.current!.onLog = (line) => {
-        const truncated = line.length > 80 ? line.slice(0, 80) + "…" : line;
-        updateLastMsg(`  ● ${truncated}`, "#aaaaaa");
         agentBuffer += line + "\n";
-        setInflightStatus((s) => s ? { ...s, lineCount: s.lineCount + 1 } : s);
+        if (line.trim()) {
+          const truncated = line.length > 80 ? line.slice(0, 80) + "…" : line;
+          updateLastMsg(`  ● ${truncated}`, "#aaaaaa");
+        }
       };
 
       pendingRef.current!.onDiff = async (patch) => {
@@ -1421,13 +1420,10 @@ function ChatApp({
           const mm = Math.floor(elapsedS / 60);
           const ss = elapsedS % 60;
           const timeStr = mm > 0 ? `${mm}m ${String(ss).padStart(2, "0")}s` : `${ss}s`;
-          const lineStr = inflightStatus.lineCount > 0
-            ? ` · ${inflightStatus.lineCount} line${inflightStatus.lineCount === 1 ? "" : "s"}`
-            : "";
           return (
             <Box paddingX={1}>
               <Text color="#6b6b6b">
-                {`  ${FRAMES[spinFrame]} running on ${inflightStatus.acceptorPubkey.slice(0, 8)}… · ${timeStr}${lineStr}`}
+                {`  ${FRAMES[spinFrame]} running on ${inflightStatus.acceptorPubkey.slice(0, 8)}… · ${timeStr}`}
               </Text>
             </Box>
           );
