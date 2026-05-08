@@ -82,7 +82,19 @@ export async function buildImage(): Promise<void> {
   }
 }
 
+async function ensurePodmanMachineRunning(runtime: ContainerRuntime): Promise<void> {
+  if (runtime !== "podman") return;
+  const { success } = await runCli(runtime, "info");
+  if (success) return;
+  console.log("Podman machine is not running. Starting automatically...");
+  const proc = spawn(["podman", "machine", "start"], { stdout: "inherit", stderr: "inherit" });
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) throw new Error("Failed to start podman machine. Run manually: podman machine start");
+}
+
 export async function ensureImage(): Promise<void> {
+  const runtime = await getRuntime();
+  await ensurePodmanMachineRunning(runtime);
   if (!(await imageExists())) await buildImage();
 }
 
