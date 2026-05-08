@@ -39,9 +39,35 @@ export const CODEX_LAST_MESSAGE_FILE = ".ash_last.md";
 
 export function buildAgentCommand(agent: AgentType): string {
   if (agent === "claude") {
-    return `export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/agent-token)" && unbuffer claude --dangerously-skip-permissions < /task/prompt.txt`;
+    // --print suppresses the TUI entirely so only structured JSON events reach stdout.
+    // --output-format stream-json gives one JSON object per line as Claude responds,
+    // letting the acceptor forward only meaningful content (text / tool names) to the
+    // requester instead of raw terminal escape sequences and spinner frames.
+    return `export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/agent-token)" && claude --dangerously-skip-permissions --print --output-format stream-json < /task/prompt.txt`;
   }
   return `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --output-last-message /workspace/${CODEX_LAST_MESSAGE_FILE} < /task/prompt.txt`;
+}
+
+// Extract loggable text from a single stream-json line.
+// Returns null for system/user/result events and empty assistant turns.
+function parseStreamJsonLine(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  try {
+    const ev = JSON.parse(trimmed) as {
+      type?: string;
+      message?: { content?: Array<{ type: string; text?: string; name?: string }> };
+    };
+    if (ev.type !== "assistant" || !ev.message?.content) return null;
+    const parts: string[] = [];
+    for (const block of ev.message.content) {
+      if (block.type === "text" && block.text) parts.push(block.text.trim());
+      else if (block.type === "tool_use" && block.name) parts.push(`[${block.name}]`);
+    }
+    return parts.filter(Boolean).join("\n") || null;
+  } catch {
+    return null;
+  }
 }
 
 export function networkMode(runtime: ContainerRuntime, hasHosts: boolean): string {
@@ -122,10 +148,16 @@ export async function runAgentInSandbox(opts: SandboxOptions): Promise<RunResult
     buildAgentCommand(agent),
   ];
 
+  // For claude, parse stream-json lines and forward only meaningful content.
+  // For codex, forward every line as-is (plain text stdout).
+  const lineHandler = (agent === "claude" && onLog)
+    ? (_s: string, line: string) => { const parsed = parseStreamJsonLine(line); if (parsed) onLog(parsed); }
+    : onLog ? (_s: string, line: string) => onLog(line) : undefined;
+
   const proc = spawn([runtime, ...args], {
     stdout: "pipe",
     stderr: "pipe",
-    onLine: onLog ? (_s, line) => onLog(line) : undefined,
+    onLine: lineHandler,
   });
 
   const timeout = setTimeout(() => {
