@@ -47,6 +47,15 @@ import type { P2PMessage } from "../../core/p2p/messages.ts";
 import { sanitizeLogLine } from "../../core/p2p/messages.ts";
 import { DEFAULT_MODEL_TIER } from "../../shared/types.ts";
 import { CHUNK_BYTES } from "../../shared/protocol.ts";
+
+function semverGt(a: string, b: string): boolean {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0);
+  }
+  return false;
+}
 import { splitFee } from "../../shared/policy.ts";
 import { ensureInitialized, NotInitializedError } from "../guard.ts";
 
@@ -227,6 +236,11 @@ export const runCommand = new Command("run")
         }
         case "task:blob_request": {
           if (msg.task_id !== taskId || peer.id !== acceptorPeer?.id) return;
+          const supportsChunks = !!peer.app_version && semverGt(peer.app_version, "0.1.5");
+          if (!supportsChunks) {
+            peer.send({ type: "task:blob", task_id: taskId, data: ciphertextB64 });
+            break;
+          }
           const chunkB64 = Math.ceil(CHUNK_BYTES * 4 / 3);
           const totalChunks = Math.ceil(ciphertextB64.length / chunkB64);
           for (let i = 0; i < totalChunks; i++) {
