@@ -202,7 +202,7 @@ function ChatApp({
       + `### Turn ${i + 1}\nUser: ${t.prompt}\n\nAgent output:\n${t.agentOutput || "(no output)"}\n\nResult: ...\n\n`.length
       + (t.diff ? t.diff.length + 30 : 0), 0)
       + "## Previous conversation in this session\n\n## Current turn\n".length;
-    return Math.min(99, Math.round(size / 32768 * 100));
+    return Math.min(99, Math.round(size / 524288 * 100));
   }, [turns]);
 
   const pendingRef = useRef<PendingTask | null>(null);
@@ -550,7 +550,7 @@ function ChatApp({
   const labelFor   = (t: string) => models.find((m) => m.tier === t)?.display_name ?? t;
 
   const buildPromptWithHistory = (userPrompt: string): string => {
-    const LIMIT = 32768;
+    const LIMIT = 524288;
     const build = (slice: Turn[]): string => {
       if (slice.length === 0) return userPrompt;
       const parts: string[] = ["## Previous conversation in this session", ""];
