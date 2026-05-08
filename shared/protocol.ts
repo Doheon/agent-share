@@ -20,6 +20,9 @@ export const MAX_BLOB_SIZE = 100 * 1024 * 1024; // 100MB
  *  whitespace tolerance. Used to bound the size of `task:blob.data` strings. */
 export const MAX_BLOB_SIZE_B64 = Math.ceil((MAX_BLOB_SIZE * 4) / 3) + 1024;
 
+/** Maximum size of the prompt field in task:announce (raw string bytes). */
+export const MAX_PROMPT_SIZE = 512 * 1024;
+
 /** Raw bytes per chunk in chunked blob transfer. */
 export const CHUNK_BYTES = 512 * 1024;
 

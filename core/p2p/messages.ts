@@ -7,7 +7,7 @@
  */
 
 import type { EarnEvent } from "../../shared/events.ts";
-import { MAX_BLOB_SIZE, MAX_BLOB_SIZE_B64, MAX_CHUNK_B64 } from "../../shared/protocol.ts";
+import { MAX_BLOB_SIZE, MAX_BLOB_SIZE_B64, MAX_CHUNK_B64, MAX_PROMPT_SIZE } from "../../shared/protocol.ts";
 
 const ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
 
@@ -45,7 +45,7 @@ export function isValidMessage(raw: any): boolean {
     // Cap the prompt — without this, an adversarial requester can ship a
     // multi-MB string in a single message and OOM the acceptor before any
     // of the per-task validation gates run.
-    if (typeof raw.prompt !== "string" || raw.prompt.length > 524288) return false;
+    if (typeof raw.prompt !== "string" || raw.prompt.length > MAX_PROMPT_SIZE) return false;
   }
   if (raw.type === "task:blob") {
     if (typeof raw.data !== "string" || raw.data.length > MAX_BLOB_SIZE_B64) return false;

@@ -52,7 +52,7 @@ import type { P2PMessage } from "../../core/p2p/messages.ts";
 import { sanitizeLogLine } from "../../core/p2p/messages.ts";
 import type { Model } from "../../shared/types.ts";
 import { DEFAULT_MODEL_TIER, modelToAgent } from "../../shared/types.ts";
-import { CLIENT_VERSION, CHUNK_BYTES } from "../../shared/protocol.ts";
+import { CLIENT_VERSION, CHUNK_BYTES, MAX_PROMPT_SIZE } from "../../shared/protocol.ts";
 import { validateAgentCredentials, ensureAgentLoggedIn, getAgentStatus } from "./init.ts";
 import { fetchCurrentUser } from "../../core/github/client.ts";
 import { AuthError, processTask, type ActiveTask } from "./serve.ts";
@@ -202,7 +202,7 @@ function ChatApp({
       + `### Turn ${i + 1}\nUser: ${t.prompt}\n\nAgent output:\n${t.agentOutput || "(no output)"}\n\nResult: ...\n\n`.length
       + (t.diff ? t.diff.length + 30 : 0), 0)
       + "## Previous conversation in this session\n\n## Current turn\n".length;
-    return Math.min(99, Math.round(size / 524288 * 100));
+    return Math.min(99, Math.round(size / MAX_PROMPT_SIZE * 100));
   }, [turns]);
 
   const pendingRef = useRef<PendingTask | null>(null);
@@ -550,7 +550,7 @@ function ChatApp({
   const labelFor   = (t: string) => models.find((m) => m.tier === t)?.display_name ?? t;
 
   const buildPromptWithHistory = (userPrompt: string): string => {
-    const LIMIT = 524288;
+    const LIMIT = MAX_PROMPT_SIZE;
     const build = (slice: Turn[]): string => {
       if (slice.length === 0) return userPrompt;
       const parts: string[] = ["## Previous conversation in this session", ""];
