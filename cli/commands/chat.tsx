@@ -58,6 +58,26 @@ import { fetchCurrentUser } from "../../core/github/client.ts";
 import { AuthError, processTask, type ActiveTask } from "./serve.ts";
 import { loadMineContext, runMineCore, runIssueQueryCore } from "./mine.ts";
 import { LoginScreen, type LoginResult } from "./login_screen.tsx";
+import { marked } from "marked";
+// @ts-ignore — no type declarations for marked-terminal
+import { markedTerminal } from "marked-terminal";
+marked.use(markedTerminal({ reflowText: false, tab: 2 }));
+
+function renderMarkdown(text: string): string[] {
+  try {
+    const rendered = marked(text) as string;
+    const lines = rendered.split("\n").map((l) => l.trimEnd());
+    const result: string[] = [];
+    for (const line of lines) {
+      if (line === "" && result.length > 0 && result[result.length - 1] === "") continue;
+      result.push(line);
+    }
+    while (result.length > 0 && result[result.length - 1] === "") result.pop();
+    return result;
+  } catch {
+    return text.split("\n");
+  }
+}
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const COMMANDS = [
@@ -732,6 +752,17 @@ function ChatApp({
         const fullCost = cost;
         const halfCost = Math.floor(cost / 2);
         const hasPatch = !!patch && patch.trim() !== "";
+
+        // Render accumulated agent output as markdown before showing diff info.
+        if (agentBuffer.trim()) {
+          const lines = renderMarkdown(agentBuffer.trim());
+          if (lines.length > 0) {
+            updateLastMsg(lines[0]);
+            if (lines.length > 1) {
+              addMsgs(lines.slice(1).map((l) => ({ id: nextId(), text: l, color: "" })));
+            }
+          }
+        }
 
         // Decide outcome: full charge on apply; half on reject / empty-diff /
         // no-response. Acceptor still did the work, so a partial charge keeps
