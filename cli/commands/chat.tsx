@@ -105,6 +105,7 @@ interface PendingTask {
 interface Turn {
   prompt: string;       // raw user prompt
   agentOutput: string;  // collected task:log lines
+  diff?: string;        // git diff of changes (truncated if large)
   diffApplied: boolean; // whether the patch was actually applied
   cost: number;         // credits charged for this turn
 }
@@ -550,6 +551,13 @@ function ChatApp({
         parts.push("");
         parts.push("Agent output:");
         parts.push(t.agentOutput || "(no output)");
+        if (t.diff) {
+          parts.push("");
+          parts.push(`Changes (${t.diffApplied ? "applied" : "not applied"}):`);
+          parts.push("```diff");
+          parts.push(t.diff);
+          parts.push("```");
+        }
         parts.push("");
         parts.push(`Result: ${t.diffApplied ? "changes applied" : "no changes applied"}`);
         parts.push("");
@@ -851,9 +859,13 @@ function ChatApp({
 
         // Save this turn to conversation history so the next task can
         // reference it via buildPromptWithHistory.
+        const MAX_DIFF = 2000;
         const newTurn: Turn = {
           prompt,
           agentOutput: agentBuffer.trim(),
+          diff: hasPatch
+            ? (patch!.length > MAX_DIFF ? patch!.slice(0, MAX_DIFF) + "\n... (truncated)" : patch!)
+            : undefined,
           diffApplied: applyRequested && appliedOk,
           cost: amount,
         };
