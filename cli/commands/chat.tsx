@@ -540,22 +540,28 @@ function ChatApp({
   const labelFor   = (t: string) => models.find((m) => m.tier === t)?.display_name ?? t;
 
   const buildPromptWithHistory = (userPrompt: string): string => {
-    const history = turnsRef.current;
-    if (history.length === 0) return userPrompt;
-    const parts: string[] = ["## Previous conversation in this session", ""];
-    history.forEach((t, i) => {
-      parts.push(`### Turn ${i + 1}`);
-      parts.push(`User: ${t.prompt}`);
-      parts.push("");
-      parts.push("Agent output:");
-      parts.push(t.agentOutput || "(no output)");
-      parts.push("");
-      parts.push(`Result: ${t.diffApplied ? "changes applied" : "no changes applied"}`);
-      parts.push("");
-    });
-    parts.push("## Current turn");
-    parts.push(userPrompt);
-    return parts.join("\n");
+    const LIMIT = 8192;
+    const build = (slice: Turn[]): string => {
+      if (slice.length === 0) return userPrompt;
+      const parts: string[] = ["## Previous conversation in this session", ""];
+      slice.forEach((t, i) => {
+        parts.push(`### Turn ${i + 1}`);
+        parts.push(`User: ${t.prompt}`);
+        parts.push("");
+        parts.push("Agent output:");
+        parts.push(t.agentOutput || "(no output)");
+        parts.push("");
+        parts.push(`Result: ${t.diffApplied ? "changes applied" : "no changes applied"}`);
+        parts.push("");
+      });
+      parts.push("## Current turn");
+      parts.push(userPrompt);
+      return parts.join("\n");
+    };
+    // Drop oldest turns until the full prompt fits within the wire limit.
+    let slice = [...turnsRef.current];
+    while (slice.length > 0 && build(slice).length > LIMIT) slice.shift();
+    return build(slice);
   };
 
   const runRequest = useCallback(async (prompt: string) => {
