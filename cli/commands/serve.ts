@@ -102,6 +102,7 @@ export interface ActiveTask {
   requesterPubkey: string;
   prompt: string;
   model: string;
+  blobSize?: number;
   blobIvB64?: string;
   encryptedAesKeyB64?: string;
   blobB64?: string;
@@ -162,8 +163,21 @@ export async function processTask(
     if (active.blobB64) r();
     else active.resolveBlob = r;
   });
-  await Promise.race([blobPromise, sleep(60_000)]);
-  if (!active.blobB64) throw new Error("requester did not deliver blob");
+  const blobSizeLabel = active.blobSize
+    ? ` (${(active.blobSize / 1024 / 1024).toFixed(1)} MB)`
+    : "";
+  logger(`  receiving blob${blobSizeLabel}…\n`);
+  const blobStart = Date.now();
+  const blobProgressTimer = setInterval(() => {
+    const secs = Math.round((Date.now() - blobStart) / 1000);
+    logger(`  still receiving blob${blobSizeLabel}… ${secs}s\n`);
+  }, 10_000);
+  await Promise.race([blobPromise, sleep(300_000)]);
+  clearInterval(blobProgressTimer);
+  if (!active.blobB64) {
+    active.peer.send({ type: "task:cancel", task_id: active.taskId });
+    throw new Error(`blob transfer timed out after 5 minutes${blobSizeLabel}`);
+  }
 
   // Decrypt and unpack.
   const ciphertext = new Uint8Array(Buffer.from(active.blobB64, "base64"));
@@ -662,6 +676,7 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
       requesterPubkey: msg.requester_pubkey,
       prompt: msg.prompt,
       model: msg.model,
+      blobSize: msg.blob_size,
       peer,
     };
 

@@ -98,6 +98,8 @@ interface PendingTask {
   // Cancel the in-flight request (broadcasts task:cancel and ends the
   // runRequest promise). Only set while `runRequest` is waiting.
   cancel?: (reason?: "user" | "timeout") => void;
+  // Called when the acceptor sends task:cancel (e.g. blob transfer timeout).
+  peerCancel?: () => void;
 }
 
 interface Turn {
@@ -433,9 +435,17 @@ function ChatApp({
           p.acceptorNextNonce = msg.next_nonce;
           await p.onMatchPending?.(peer, msg.next_nonce, msg.rsa_public_key);
           break;
-        case "task:blob_request":
+        case "task:blob_request": {
           if (msg.task_id !== p.taskId || peer.id !== p.acceptorPeer?.id) return;
+          const uploadMB = (p.ciphertextB64.length * 3 / 4 / 1024 / 1024).toFixed(1);
+          updateLastMsg(`  ↑ uploading ${uploadMB} MB…`);
           peer.send({ type: "task:blob", task_id: p.taskId, data: p.ciphertextB64 });
+          updateLastMsg(`  ↑ ${uploadMB} MB sent · running…`);
+          break;
+        }
+        case "task:cancel":
+          if (msg.task_id !== p.taskId || peer.id !== p.acceptorPeer?.id) return;
+          p.peerCancel?.();
           break;
         case "task:log":
           if (msg.task_id !== p.taskId || peer.id !== p.acceptorPeer?.id) return;
@@ -608,6 +618,12 @@ function ChatApp({
             : "  ⎿ cancelled",
           "#e3bd5a",
         );
+        finish();
+      };
+
+      pendingRef.current!.peerCancel = () => {
+        if (done) return;
+        addMsg("  ⎿ upload timed out on acceptor — no credits charged", "#ff8888");
         finish();
       };
 
