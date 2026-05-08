@@ -106,6 +106,8 @@ export interface ActiveTask {
   blobIvB64?: string;
   encryptedAesKeyB64?: string;
   blobB64?: string;
+  blobChunks?: string[];
+  onBlobChunk?: (received: number, total: number) => void;
   peer: SwarmPeer;
   resolveBlob?: () => void;
   resolveMatch?: () => void;
@@ -163,20 +165,28 @@ export async function processTask(
     if (active.blobB64) r();
     else active.resolveBlob = r;
   });
-  const blobSizeLabel = active.blobSize
-    ? ` (${(active.blobSize / 1024 / 1024).toFixed(1)} MB)`
-    : "";
-  logger(`  receiving blob${blobSizeLabel}…\n`);
-  const blobStart = Date.now();
-  const blobProgressTimer = setInterval(() => {
-    const secs = Math.round((Date.now() - blobStart) / 1000);
-    logger(`  still receiving blob${blobSizeLabel}… ${secs}s\n`);
-  }, 10_000);
+  const blobSizeMB = active.blobSize ? (active.blobSize / 1024 / 1024).toFixed(1) : "?";
+  logger(`  receiving blob (${blobSizeMB} MB)…\n`);
+
+  // Show progress bar as chunks arrive.
+  const BAR_WIDTH = 20;
+  let lastLoggedPct = -1;
+  active.onBlobChunk = (received, total) => {
+    const pct = Math.floor(received / total * 100);
+    if (pct >= lastLoggedPct + 25 || received === total) {
+      lastLoggedPct = pct;
+      const filled = Math.round(BAR_WIDTH * received / total);
+      const bar = "█".repeat(filled) + "░".repeat(BAR_WIDTH - filled);
+      const rcvMB = (received / total * (active.blobSize ?? 0) / 1024 / 1024).toFixed(1);
+      logger(`  [${bar}] ${pct}%  ${rcvMB}/${blobSizeMB} MB\n`);
+    }
+  };
+
   await Promise.race([blobPromise, sleep(300_000)]);
-  clearInterval(blobProgressTimer);
+  active.onBlobChunk = undefined;
   if (!active.blobB64) {
     active.peer.send({ type: "task:cancel", task_id: active.taskId });
-    throw new Error(`blob transfer timed out after 5 minutes${blobSizeLabel}`);
+    throw new Error(`blob transfer timed out after 5 minutes (${blobSizeMB} MB)`);
   }
 
   // Decrypt and unpack.
@@ -519,6 +529,18 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
           active.blobB64 = msg.data;
           active.resolveBlob?.();
           return;
+        case "task:blob_chunk": {
+          if (msg.task_id !== active.taskId) return;
+          if (!active.blobChunks) active.blobChunks = new Array(msg.total);
+          active.blobChunks[msg.index] = msg.data;
+          const received = active.blobChunks.filter((s) => s !== undefined).length;
+          active.onBlobChunk?.(received, msg.total);
+          if (received >= msg.total) {
+            active.blobB64 = active.blobChunks.join("");
+            active.resolveBlob?.();
+          }
+          return;
+        }
         case "spend:cosign":
           if (msg.task_id !== active.taskId) return;
           active.resolveSpend?.(msg.spend_event);

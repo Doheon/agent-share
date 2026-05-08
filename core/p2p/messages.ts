@@ -7,7 +7,7 @@
  */
 
 import type { EarnEvent } from "../../shared/events.ts";
-import { MAX_BLOB_SIZE, MAX_BLOB_SIZE_B64 } from "../../shared/protocol.ts";
+import { MAX_BLOB_SIZE, MAX_BLOB_SIZE_B64, MAX_CHUNK_B64 } from "../../shared/protocol.ts";
 
 const ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
 
@@ -17,7 +17,7 @@ export function isValidId(id: unknown): id is string {
 
 const TASK_ID_TYPES = new Set([
   "task:announce", "task:claim", "task:match", "task:blob_request",
-  "task:blob", "task:diff", "task:settle", "task:cancel", "task:log",
+  "task:blob", "task:blob_chunk", "task:diff", "task:settle", "task:cancel", "task:log",
   "task:price_mismatch",
   "spend:cosign", "earn:cosign", "mine:claim",
 ]);
@@ -49,6 +49,11 @@ export function isValidMessage(raw: any): boolean {
   }
   if (raw.type === "task:blob") {
     if (typeof raw.data !== "string" || raw.data.length > MAX_BLOB_SIZE_B64) return false;
+  }
+  if (raw.type === "task:blob_chunk") {
+    if (typeof raw.index !== "number" || !Number.isInteger(raw.index) || raw.index < 0) return false;
+    if (typeof raw.total !== "number" || !Number.isInteger(raw.total) || raw.total < 1 || raw.total > 2000) return false;
+    if (typeof raw.data !== "string" || raw.data.length > MAX_CHUNK_B64) return false;
   }
   if (raw.type === "task:log") {
     // Cap log lines so a hostile peer cannot exhaust memory by spraying
@@ -162,6 +167,13 @@ export type P2PMessage =
       type: "task:blob";
       task_id: string;
       data: string; // base64-encoded ciphertext (without IV prefix)
+    }
+  | {
+      type: "task:blob_chunk";
+      task_id: string;
+      index: number;  // 0-based
+      total: number;  // total chunk count
+      data: string;   // base64-encoded slice of the ciphertext
     }
   | {
       type: "task:diff";

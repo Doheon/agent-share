@@ -46,6 +46,7 @@ import { AshSwarm, type SwarmPeer } from "../../core/p2p/swarm.ts";
 import type { P2PMessage } from "../../core/p2p/messages.ts";
 import { sanitizeLogLine } from "../../core/p2p/messages.ts";
 import { DEFAULT_MODEL_TIER } from "../../shared/types.ts";
+import { CHUNK_BYTES } from "../../shared/protocol.ts";
 import { splitFee } from "../../shared/policy.ts";
 import { ensureInitialized, NotInitializedError } from "../guard.ts";
 
@@ -226,7 +227,17 @@ export const runCommand = new Command("run")
         }
         case "task:blob_request": {
           if (msg.task_id !== taskId || peer.id !== acceptorPeer?.id) return;
-          peer.send({ type: "task:blob", task_id: taskId, data: ciphertextB64 });
+          const chunkB64 = Math.ceil(CHUNK_BYTES * 4 / 3);
+          const totalChunks = Math.ceil(ciphertextB64.length / chunkB64);
+          for (let i = 0; i < totalChunks; i++) {
+            peer.send({
+              type: "task:blob_chunk",
+              task_id: taskId,
+              index: i,
+              total: totalChunks,
+              data: ciphertextB64.slice(i * chunkB64, (i + 1) * chunkB64),
+            });
+          }
           break;
         }
         case "task:log": {

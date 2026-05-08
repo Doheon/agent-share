@@ -52,7 +52,7 @@ import type { P2PMessage } from "../../core/p2p/messages.ts";
 import { sanitizeLogLine } from "../../core/p2p/messages.ts";
 import type { Model } from "../../shared/types.ts";
 import { DEFAULT_MODEL_TIER, modelToAgent } from "../../shared/types.ts";
-import { CLIENT_VERSION } from "../../shared/protocol.ts";
+import { CLIENT_VERSION, CHUNK_BYTES } from "../../shared/protocol.ts";
 import { validateAgentCredentials, ensureAgentLoggedIn, getAgentStatus } from "./init.ts";
 import { fetchCurrentUser } from "../../core/github/client.ts";
 import { AuthError, processTask, type ActiveTask } from "./serve.ts";
@@ -382,6 +382,18 @@ function ChatApp({
               sm.active.blobB64 = msg.data;
               sm.active.resolveBlob?.();
               return;
+            case "task:blob_chunk": {
+              if (msg.task_id !== sm.active.taskId) return;
+              if (!sm.active.blobChunks) sm.active.blobChunks = new Array(msg.total);
+              sm.active.blobChunks[msg.index] = msg.data;
+              const received = sm.active.blobChunks.filter((s) => s !== undefined).length;
+              sm.active.onBlobChunk?.(received, msg.total);
+              if (received >= msg.total) {
+                sm.active.blobB64 = sm.active.blobChunks.join("");
+                sm.active.resolveBlob?.();
+              }
+              return;
+            }
             case "spend:cosign":
               if (msg.task_id !== sm.active.taskId) return;
               sm.active.resolveSpend?.(msg.spend_event);
@@ -437,10 +449,29 @@ function ChatApp({
           break;
         case "task:blob_request": {
           if (msg.task_id !== p.taskId || peer.id !== p.acceptorPeer?.id) return;
-          const uploadMB = (p.ciphertextB64.length * 3 / 4 / 1024 / 1024).toFixed(1);
-          updateLastMsg(`  ↑ uploading ${uploadMB} MB…`);
-          peer.send({ type: "task:blob", task_id: p.taskId, data: p.ciphertextB64 });
-          updateLastMsg(`  ↑ ${uploadMB} MB sent · running…`);
+          const totalBytes = p.ciphertextB64.length * 3 / 4;
+          const totalMB = (totalBytes / 1024 / 1024).toFixed(1);
+          const chunkB64 = Math.ceil(CHUNK_BYTES * 4 / 3);
+          const totalChunks = Math.ceil(p.ciphertextB64.length / chunkB64);
+          const BAR_WIDTH = 20;
+          for (let i = 0; i < totalChunks; i++) {
+            peer.send({
+              type: "task:blob_chunk",
+              task_id: p.taskId,
+              index: i,
+              total: totalChunks,
+              data: p.ciphertextB64.slice(i * chunkB64, (i + 1) * chunkB64),
+            });
+            const filled = Math.round(BAR_WIDTH * (i + 1) / totalChunks);
+            const bar = "█".repeat(filled) + "░".repeat(BAR_WIDTH - filled);
+            const pct = Math.round((i + 1) / totalChunks * 100);
+            const sentMB = (Math.min((i + 1) * CHUNK_BYTES, totalBytes) / 1024 / 1024).toFixed(1);
+            updateLastMsg(`  ↑ [${bar}] ${pct}% (${sentMB}/${totalMB} MB)`);
+            if (i % 10 === 9 || i === totalChunks - 1) {
+              await new Promise<void>((r) => setTimeout(r, 0));
+            }
+          }
+          updateLastMsg(`  ↑ ${totalMB} MB sent · running…`);
           break;
         }
         case "task:cancel":
