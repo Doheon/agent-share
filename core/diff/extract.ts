@@ -37,13 +37,33 @@ export async function initRepo(workDir: string): Promise<void> {
   await runGit(["tag", "ash-initial"], workDir);
 }
 
-export async function extractDiff(workDir: string): Promise<DiffResult> {
+export async function extractDiff(workDir: string, logger?: (s: string) => void): Promise<DiffResult> {
   await runGit(["add", "-A"], workDir);
   // Commit any remaining changes so the full diff (including agent's own commits) is captured.
   await runGit(["commit", "--allow-empty", "-m", "ash-work-end"], workDir);
 
-  const { stdout: patch }   = await runGit(["diff", "ash-initial..HEAD", "--unified=3"], workDir);
+  const { stdout: patch, stderr: diffErr, success: diffOk } =
+    await runGit(["diff", "ash-initial..HEAD", "--unified=3"], workDir);
   const { stdout: numstat } = await runGit(["diff", "ash-initial..HEAD", "--numstat"], workDir);
+
+  if (!patch.trim()) {
+    // Surface diagnostics so the acceptor (and requester via task:log) can see why.
+    const { stdout: log } = await runGit(["log", "--oneline", "--all"], workDir);
+    const { stdout: status } = await runGit(["status", "--short"], workDir);
+    const diagLines = [
+      `git log: ${log.trim().replace(/\n/g, " | ") || "(empty)"}`,
+      `git status: ${status.trim() || "(clean)"}`,
+      ...(diffErr.trim() ? [`git diff stderr: ${diffErr.trim()}`] : []),
+    ];
+    for (const line of diagLines) {
+      (logger ?? ((s) => console.error("[ash]", s)))(line);
+    }
+    if (!diffOk && diffErr.includes("ash-initial")) {
+      (logger ?? ((s) => console.error("[ash]", s)))(
+        "ash-initial tag missing — was it removed by the agent?",
+      );
+    }
+  }
 
   let insertions = 0;
   let deletions = 0;

@@ -245,7 +245,7 @@ export async function processTask(
   }
 
   // Extract diff & ship it. If auth failed, send empty patch so the requester rejects cleanly.
-  const diff = await extractDiff(workDir);
+  const diff = await extractDiff(workDir, logger);
   const patch = authHit ? "" : diff.patch;
   active.peer.send({ type: "task:diff", task_id: active.taskId, patch });
   if (authHit) {

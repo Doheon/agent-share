@@ -14,8 +14,8 @@ function isIgnored(relPath: string, patterns: RegExp[]): boolean {
 // obvious never-upload items (vcs metadata, dependency trees, OS junk, and
 // the ash binary itself which is 60+MB).
 const ALWAYS_IGNORE: RegExp[] = [
-  /^\.git\//,
-  /^node_modules\//,
+  /(^|\/)\.git\//,
+  /(^|\/)node_modules\//,
   /(^|\/)\.DS_Store$/,
   /^\.env/,
   /^ash$/,
