@@ -53,8 +53,6 @@
     "hypercore": "^11.28.1",
     "hyperswarm": "^4.17.0",
     "ink": "^7.0.1",
-    "marked": "^15.0.12",
-    "marked-terminal": "^7.3.0",
     "react": "^19",
     "string-width": "^8",
     "tsx": "^4.21.0"

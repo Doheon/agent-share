@@ -58,25 +58,40 @@ import { fetchCurrentUser } from "../../core/github/client.ts";
 import { AuthError, processTask, type ActiveTask } from "./serve.ts";
 import { loadMineContext, runMineCore, runIssueQueryCore } from "./mine.ts";
 import { LoginScreen, type LoginResult } from "./login_screen.tsx";
-import { marked } from "marked";
-// @ts-ignore — no type declarations for marked-terminal
-import { markedTerminal } from "marked-terminal";
-marked.use(markedTerminal({ reflowText: false, tab: 2 }));
+
+const A = { reset: "\x1b[0m", bold: "\x1b[1m", dim: "\x1b[2m", cyan: "\x1b[36m", yellow: "\x1b[33m", green: "\x1b[32m" };
+
+function applyInline(s: string): string {
+  return s
+    .replace(/\*\*([^*]+)\*\*/g, `${A.bold}$1${A.reset}`)
+    .replace(/`([^`]+)`/g, `${A.cyan}$1${A.reset}`);
+}
 
 function renderMarkdown(text: string): string[] {
-  try {
-    const rendered = marked(text) as string;
-    const lines = rendered.split("\n").map((l) => l.trimEnd());
-    const result: string[] = [];
-    for (const line of lines) {
-      if (line === "" && result.length > 0 && result[result.length - 1] === "") continue;
-      result.push(line);
+  const out: string[] = [];
+  let inCode = false;
+  for (const raw of text.split("\n")) {
+    const line = raw.trimEnd();
+    if (line.startsWith("```")) { inCode = !inCode; out.push(""); continue; }
+    if (inCode) { out.push(`  ${A.dim}${line}${A.reset}`); continue; }
+    if (line.startsWith("### ")) out.push(`${A.bold}${A.cyan}${line.slice(4)}${A.reset}`);
+    else if (line.startsWith("## "))  out.push(`${A.bold}${A.yellow}${line.slice(3)}${A.reset}`);
+    else if (line.startsWith("# "))   out.push(`${A.bold}${A.green}${line.slice(2)}${A.reset}`);
+    else if (/^\|[-| ]+\|$/.test(line)) continue; // table separator
+    else if (line.startsWith("|") && line.endsWith("|")) {
+      const cells = line.split("|").slice(1, -1).map((c) => c.trim());
+      out.push("  " + cells.join("  ·  "));
     }
-    while (result.length > 0 && result[result.length - 1] === "") result.pop();
-    return result;
-  } catch {
-    return text.split("\n");
+    else if (/^[ \t]*[-*] /.test(line)) out.push(line.replace(/^([ \t]*)[-*] /, "$1• ").replace(/•(.*)/, (_, r) => `• ${applyInline(r.trim())}`));
+    else out.push(applyInline(line));
   }
+  const deduped: string[] = [];
+  for (const l of out) {
+    if (l === "" && deduped.length > 0 && deduped[deduped.length - 1] === "") continue;
+    deduped.push(l);
+  }
+  while (deduped.length > 0 && deduped[deduped.length - 1] === "") deduped.pop();
+  return deduped;
 }
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
