@@ -1381,6 +1381,7 @@ function ChatApp({
     termHeight - HEADER_LINES - inputLines.length - 3 - menuHeight - inflightLines,
   );
   const countMsgLines = (msg: { text: string }) =>
+    msg.text.length === 0 ? 0 :
     msg.text.split("\n").reduce((n, line) => n + Math.max(1, Math.ceil(stringWidth(line) / effectiveMsgWidth)), 0);
   let usedLines = 0;
   const visibleMsgs: typeof msgs = [];
@@ -1437,8 +1438,8 @@ function ChatApp({
       </Static>
 
       <Box flexDirection="column">
-        {/* Messages fill available space from the top; sliced by line count to fit. */}
-        <Box flexDirection="column" flexGrow={1}>
+        {/* Messages sliced by line count; no flexGrow so box sizes to content. */}
+        <Box flexDirection="column">
           {visibleMsgs.map((msg) => (
             <Box key={msg.id} paddingX={1}>
               <Text color={msg.color}>{msg.text}</Text>
