@@ -102,7 +102,7 @@ export async function runAgentInSandbox(opts: SandboxOptions): Promise<RunResult
     : [];
 
   const args: string[] = [
-    "run", "--rm",
+    "run", "--rm", "--tty",
     `--network=${networkMode(runtime, allowedHosts.length > 0)}`,
     // `:Z` (uppercase) gives a private SELinux label per container —
     // lowercase `:z` would relabel the host file as shared-content,
