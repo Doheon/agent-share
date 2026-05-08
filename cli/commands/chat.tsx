@@ -233,11 +233,14 @@ function ChatApp({
     setMsgs((prev) => [...prev, ...newLines]);
   }, []);
 
-  const updateLastMsg = useCallback((text: string) => {
+  const updateLastMsg = useCallback((text: string, color?: string) => {
     setMsgs((prev) => {
       if (prev.length === 0) return prev;
       const updated = [...prev];
-      updated[updated.length - 1] = { ...updated[updated.length - 1], text };
+      const last = updated[updated.length - 1];
+      updated[updated.length - 1] = color !== undefined
+        ? { ...last, text, color }
+        : { ...last, text };
       return updated;
     });
   }, []);
@@ -453,7 +456,8 @@ function ChatApp({
           const totalMB = (totalBytes / 1024 / 1024).toFixed(1);
           const chunkB64 = Math.ceil(CHUNK_BYTES * 4 / 3);
           const totalChunks = Math.ceil(p.ciphertextB64.length / chunkB64);
-          const BAR_WIDTH = 20;
+          const BAR_WIDTH = 22;
+          const uploadStart = Date.now();
           for (let i = 0; i < totalChunks; i++) {
             peer.send({
               type: "task:blob_chunk",
@@ -462,16 +466,27 @@ function ChatApp({
               total: totalChunks,
               data: p.ciphertextB64.slice(i * chunkB64, (i + 1) * chunkB64),
             });
-            const filled = Math.round(BAR_WIDTH * (i + 1) / totalChunks);
-            const bar = "█".repeat(filled) + "░".repeat(BAR_WIDTH - filled);
-            const pct = Math.round((i + 1) / totalChunks * 100);
-            const sentMB = (Math.min((i + 1) * CHUNK_BYTES, totalBytes) / 1024 / 1024).toFixed(1);
-            updateLastMsg(`  ↑ [${bar}] ${pct}% (${sentMB}/${totalMB} MB)`);
-            if (i % 10 === 9 || i === totalChunks - 1) {
+            const sentBytes = Math.min((i + 1) * CHUNK_BYTES, totalBytes);
+            const ratio = (i + 1) / totalChunks;
+            const filled = Math.floor(BAR_WIDTH * ratio);
+            const isLast = i === totalChunks - 1;
+            const bar = isLast
+              ? "█".repeat(BAR_WIDTH)
+              : "█".repeat(Math.max(0, filled - 1)) + "▒" + "░".repeat(BAR_WIDTH - filled);
+            const pct = Math.round(ratio * 100).toString().padStart(3);
+            const sentMB = (sentBytes / 1024 / 1024).toFixed(1).padStart(5);
+            const elapsed = (Date.now() - uploadStart) / 1000;
+            const speedStr = elapsed > 0.2
+              ? `  ·  ${(sentBytes / elapsed / 1024 / 1024).toFixed(1)} MB/s`
+              : "";
+            updateLastMsg(`  ↑  ${bar}  ${pct}%  ·  ${sentMB}/${totalMB} MB${speedStr}`, "#00c8ff");
+            if (i % 10 === 9 || isLast) {
               await new Promise<void>((r) => setTimeout(r, 0));
             }
           }
-          updateLastMsg(`  ↑ ${totalMB} MB sent · running…`);
+          const elapsed = (Date.now() - uploadStart) / 1000;
+          const avgSpeed = elapsed > 0 ? (totalBytes / elapsed / 1024 / 1024).toFixed(1) : "—";
+          updateLastMsg(`  ↑  ${totalMB} MB uploaded  ·  ${avgSpeed} MB/s avg  ·  running…`, "#7cd38a");
           break;
         }
         case "task:cancel":
