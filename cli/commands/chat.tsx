@@ -540,7 +540,7 @@ function ChatApp({
   const labelFor   = (t: string) => models.find((m) => m.tier === t)?.display_name ?? t;
 
   const buildPromptWithHistory = (userPrompt: string): string => {
-    const LIMIT = 8192;
+    const LIMIT = 32768;
     const build = (slice: Turn[]): string => {
       if (slice.length === 0) return userPrompt;
       const parts: string[] = ["## Previous conversation in this session", ""];
