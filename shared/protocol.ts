@@ -9,8 +9,6 @@
 export const PROTOCOL_VERSION = 1 as const;
 export const CLIENT_VERSION = "0.1.6" as const;
 
-/** Minimum app version that supports task:blob_chunk. */
-export const MIN_CHUNK_VERSION = "0.1.6" as const;
 
 /** Maximum size of a packed task blob (raw bytes). Enforced both at pack-time
  *  by the requester and at unpack-time by the acceptor. Also rejected at the
