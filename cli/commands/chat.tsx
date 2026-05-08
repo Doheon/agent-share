@@ -1363,11 +1363,8 @@ function ChatApp({
   const cursorRow = beforeCursor.split("\n").length - 1;
   const cursorCol = stringWidth(beforeCursor.split("\n").pop() ?? "");
 
-  // Cursor y anchored to terminal bottom — independent of message count.
-  // Static header occupies 6 rows (topLine + 3 content + bottom border + marginBottom).
-  // Input box = top separator + inputLines + bottom separator at the very bottom of the
-  // fixed-height dynamic area, so cursor row = termHeight - 6 - inputLines.length - 1 + cursorRow.
-  const HEADER_LINES = 6;
+  const inflightLines = inflightStatus ? 1 : 0;
+
   // Menu/picker below input shifts the input up by their height.
   const menuHeight = (!loginActive && !serveDisplay)
     ? pickerActive
@@ -1375,11 +1372,33 @@ function ChatApp({
       : menuItems.length
     : 0;
 
+  // Static header = 6 rows. Dynamic area = termHeight - 6.
+  // Fixed rows at bottom: input box (inputLines+2) + status bar (1) + menu + inflight.
+  // Messages fill whatever remains at the top; slice by line count to match exactly.
+  const HEADER_LINES = 6;
+  const effectiveMsgWidth = Math.max(1, termWidth - 2);
+  const msgBudget = Math.max(1,
+    termHeight - HEADER_LINES - inputLines.length - 3 - menuHeight - inflightLines,
+  );
+  const countMsgLines = (msg: { text: string }) =>
+    msg.text.split("\n").reduce((n, line) => n + Math.max(1, Math.ceil(stringWidth(line) / effectiveMsgWidth)), 0);
+  let usedLines = 0;
+  const visibleMsgs: typeof msgs = [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const l = countMsgLines(msgs[i]);
+    if (usedLines + l > msgBudget) break;
+    usedLines += l;
+    visibleMsgs.unshift(msgs[i]);
+  }
+  if (visibleMsgs.length === 0 && msgs.length > 0) visibleMsgs.push(msgs[msgs.length - 1]);
+
+  // Cursor y from top of dynamic section: messages + inflight + top-separator + cursorRow.
+  // Menu is below the input so it doesn't shift the input's y position.
   const { setCursorPosition } = useCursor();
   if (!serveDisplay && !loginActive) {
     setCursorPosition({
       x: 3 + cursorCol,
-      y: termHeight - HEADER_LINES - inputLines.length - 2 + cursorRow - menuHeight,
+      y: usedLines + inflightLines + 1 + cursorRow,
     });
   } else {
     setCursorPosition({ x: 0, y: 0 });
@@ -1417,13 +1436,10 @@ function ChatApp({
         )}
       </Static>
 
-      {/* Fixed-height dynamic area = terminal rows minus the static header.
-          Messages fill available space via flexGrow; yoga clips overflow so
-          the input box is always pinned at the bottom. */}
-      <Box flexDirection="column" height={termHeight - HEADER_LINES}>
-        {/* Messages fill remaining space, latest at bottom; overflow clipped by yoga. */}
-        <Box flexDirection="column" flexGrow={1} justifyContent="flex-end" overflow="hidden">
-          {msgs.map((msg) => (
+      <Box flexDirection="column">
+        {/* Messages fill available space from the top; sliced by line count to fit. */}
+        <Box flexDirection="column" flexGrow={1}>
+          {visibleMsgs.map((msg) => (
             <Box key={msg.id} paddingX={1}>
               <Text color={msg.color}>{msg.text}</Text>
             </Box>
