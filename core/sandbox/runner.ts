@@ -13,7 +13,7 @@ export interface SandboxOptions {
   agent: AgentType;
   prompt: string;
   allowedHosts: string[];
-  onLog?: (line: string) => void;
+  onLog?: (line: string, historyOnly?: boolean) => void;
   timeoutMs?: number;
 }
 
@@ -48,23 +48,67 @@ export function buildAgentCommand(agent: AgentType): string {
   return `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --output-last-message /workspace/${CODEX_LAST_MESSAGE_FILE} < /task/prompt.txt`;
 }
 
-// Extract loggable text from a single stream-json line.
-// Returns null for system/user/result events and empty assistant turns.
-function parseStreamJsonLine(line: string): string | null {
+type ParsedLine = { text: string; historyOnly: boolean };
+
+function formatToolInput(name: string, input: Record<string, unknown>): string {
+  if (name === "Bash" && typeof input.command === "string")
+    return input.command.split("\n")[0].slice(0, 60);
+  if ((name === "Read" || name === "Write" || name === "Edit") && typeof input.file_path === "string")
+    return input.file_path;
+  if (name === "Glob" && typeof input.pattern === "string") return input.pattern;
+  if (name === "Grep") {
+    return [input.pattern, input.path].filter((s) => typeof s === "string").join(" in ").slice(0, 60);
+  }
+  return JSON.stringify(input).slice(0, 60);
+}
+
+// Extract loggable content from a single stream-json line.
+// assistant events → display + history (historyOnly: false)
+// user events (tool results) → history only (historyOnly: true)
+function parseStreamJsonLine(line: string): ParsedLine | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
   try {
     const ev = JSON.parse(trimmed) as {
       type?: string;
-      message?: { content?: Array<{ type: string; text?: string; name?: string }> };
+      message?: {
+        content?: Array<{
+          type: string;
+          text?: string;
+          name?: string;
+          input?: Record<string, unknown>;
+          content?: string | Array<{ type: string; text?: string }>;
+        }>;
+      };
     };
-    if (ev.type !== "assistant" || !ev.message?.content) return null;
-    const parts: string[] = [];
-    for (const block of ev.message.content) {
-      if (block.type === "text" && block.text) parts.push(block.text.trim());
-      else if (block.type === "tool_use" && block.name) parts.push(`[${block.name}]`);
+
+    if (ev.type === "assistant" && ev.message?.content) {
+      const parts: string[] = [];
+      for (const block of ev.message.content) {
+        if (block.type === "text" && block.text) parts.push(block.text.trim());
+        else if (block.type === "tool_use" && block.name)
+          parts.push(`[${block.name}: ${formatToolInput(block.name, block.input ?? {})}]`);
+      }
+      const text = parts.filter(Boolean).join("\n");
+      return text ? { text, historyOnly: false } : null;
     }
-    return parts.filter(Boolean).join("\n") || null;
+
+    if (ev.type === "user" && ev.message?.content) {
+      const parts: string[] = [];
+      for (const block of ev.message.content) {
+        if (block.type !== "tool_result") continue;
+        if (typeof block.content === "string") parts.push(block.content);
+        else if (Array.isArray(block.content)) {
+          for (const c of block.content) {
+            if (c.type === "text" && c.text) parts.push(c.text);
+          }
+        }
+      }
+      const text = parts.filter(Boolean).join("\n");
+      return text ? { text, historyOnly: true } : null;
+    }
+
+    return null;
   } catch {
     return null;
   }
@@ -151,7 +195,10 @@ export async function runAgentInSandbox(opts: SandboxOptions): Promise<RunResult
   // For claude, parse stream-json lines and forward only meaningful content.
   // For codex, forward every line as-is (plain text stdout).
   const lineHandler = (agent === "claude" && onLog)
-    ? (_s: string, line: string) => { const parsed = parseStreamJsonLine(line); if (parsed) onLog(parsed); }
+    ? (_s: string, line: string) => {
+        const parsed = parseStreamJsonLine(line);
+        if (parsed) onLog(parsed.text, parsed.historyOnly);
+      }
     : onLog ? (_s: string, line: string) => onLog(line) : undefined;
 
   const proc = spawn([runtime, ...args], {

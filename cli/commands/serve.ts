@@ -222,10 +222,10 @@ export async function processTask(
     agent,
     prompt: active.prompt,
     allowedHosts,
-    onLog: (line) => {
-      logger(`  ${D}${line}${R}\n`);
+    onLog: (line, historyOnly) => {
+      if (!historyOnly) logger(`  ${D}${line}${R}\n`);
       if (forwardLogs) {
-        active.peer.send({ type: "task:log", task_id: active.taskId, line });
+        active.peer.send({ type: "task:log", task_id: active.taskId, line, history_only: historyOnly });
       }
       if (isAuthLine(line)) authHit = true;
     },

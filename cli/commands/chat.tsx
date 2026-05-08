@@ -126,7 +126,7 @@ interface PendingTask {
   acceptorNextNonce: number;
   announce?: Extract<P2PMessage, { type: "task:announce" }>;
   onMatchPending?: (peer: SwarmPeer, claimNonce: number, rsaPubPem: string) => Promise<void>;
-  onLog?: (line: string) => void;
+  onLog?: (line: string, historyOnly?: boolean) => void;
   onDiff?: (patch: string) => Promise<void>;
   resolveSettle?: (action: "approve" | "reject") => void;
   // Cancel the in-flight request (broadcasts task:cancel and ends the
@@ -539,7 +539,7 @@ function ChatApp({
           break;
         case "task:log":
           if (msg.task_id !== p.taskId || peer.id !== p.acceptorPeer?.id) return;
-          p.onLog?.(sanitizeLogLine(msg.line));
+          p.onLog?.(sanitizeLogLine(msg.line), msg.history_only);
           break;
         case "task:diff":
           if (msg.task_id !== p.taskId || peer.id !== p.acceptorPeer?.id) return;
@@ -753,9 +753,9 @@ function ChatApp({
         }
       };
 
-      pendingRef.current!.onLog = (line) => {
+      pendingRef.current!.onLog = (line, historyOnly) => {
         agentBuffer += line + "\n";
-        if (line.trim()) {
+        if (!historyOnly && line.trim()) {
           const truncated = line.length > 80 ? line.slice(0, 80) + "…" : line;
           updateLastMsg(`  ● ${truncated}`, "#aaaaaa");
         }

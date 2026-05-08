@@ -193,6 +193,7 @@ export type P2PMessage =
       type: "task:log";
       task_id: string;
       line: string;
+      history_only?: boolean;
     }
   | {
       type: "spend:cosign";
