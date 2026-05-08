@@ -34,13 +34,16 @@ export async function initRepo(workDir: string): Promise<void> {
   // (e.g. requester ran `ash` from a directory that was entirely ignored).
   const { success, stderr } = await runGit(["commit", "--allow-empty", "-m", "initial snapshot"], workDir);
   if (!success) throw new Error(`Initial commit failed: ${stderr}`);
+  await runGit(["tag", "ash-initial"], workDir);
 }
 
 export async function extractDiff(workDir: string): Promise<DiffResult> {
   await runGit(["add", "-A"], workDir);
+  // Commit any remaining changes so the full diff (including agent's own commits) is captured.
+  await runGit(["commit", "--allow-empty", "-m", "ash-work-end"], workDir);
 
-  const { stdout: patch }   = await runGit(["diff", "--cached", "--unified=3"], workDir);
-  const { stdout: numstat } = await runGit(["diff", "--cached", "--numstat"], workDir);
+  const { stdout: patch }   = await runGit(["diff", "ash-initial..HEAD", "--unified=3"], workDir);
+  const { stdout: numstat } = await runGit(["diff", "ash-initial..HEAD", "--numstat"], workDir);
 
   let insertions = 0;
   let deletions = 0;
