@@ -43,7 +43,7 @@ export function buildAgentCommand(agent: AgentType): string {
     // --output-format stream-json gives one JSON object per line as Claude responds,
     // letting the acceptor forward only meaningful content (text / tool names) to the
     // requester instead of raw terminal escape sequences and spinner frames.
-    return `export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/agent-token)" && claude --dangerously-skip-permissions --print --output-format stream-json < /task/prompt.txt`;
+    return `export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/agent-token)" && claude --dangerously-skip-permissions --print --output-format stream-json --verbose < /task/prompt.txt`;
   }
   return `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --output-last-message /workspace/${CODEX_LAST_MESSAGE_FILE} < /task/prompt.txt`;
 }
