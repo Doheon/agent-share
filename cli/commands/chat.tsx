@@ -3,7 +3,8 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { render, Box, Text, Static, useInput, useApp, useStdout } from "ink";
+import stringWidth from "string-width";
+import { render, Box, Text, Static, useInput, useApp, useStdout, useCursor } from "ink";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import type { KeyObject } from "node:crypto";
@@ -1360,18 +1361,27 @@ function ChatApp({
   const statusDir = process.cwd().replace(homedir(), "~");
   const statusDirShort = statusDir.length > 40 ? "…" + statusDir.slice(-39) : statusDir;
 
-  // Build input lines with an inline block cursor (chalk.inverse style) so
-  // cursor position is always correct regardless of how many lines the message
-  // area wraps to — no fragile line-count arithmetic needed.
-  const cursorChar = inputVal[cursorPos];
-  const isCursorAtNewline = cursorChar === "\n";
-  const displayCursorChar = isCursorAtNewline ? " " : (cursorChar ?? " ");
-  const inputWithCursor =
-    inputVal.slice(0, cursorPos) +
-    "\x1b[7m" + displayCursorChar + "\x1b[0m" +
-    (isCursorAtNewline ? "\n" : "") +
-    inputVal.slice(cursorPos + 1);
-  const inputLinesWithCursor = inputWithCursor.split("\n");
+  const inputLines = inputVal.length === 0 ? [""] : inputVal.split("\n");
+  const beforeCursor = inputVal.slice(0, cursorPos);
+  const cursorRow = beforeCursor.split("\n").length - 1;
+  const cursorCol = stringWidth(beforeCursor.split("\n").pop() ?? "");
+
+  // Count actual terminal lines each message occupies (handles wrapping).
+  // paddingX={1} on message boxes → effective width = termWidth - 2.
+  const effectiveMsgWidth = Math.max(1, termWidth - 2);
+  const msgDisplayLines = visibleMsgs.reduce((total, msg) => {
+    return total + msg.text.split("\n").reduce((n, line) => {
+      return n + Math.max(1, Math.ceil(stringWidth(line) / effectiveMsgWidth));
+    }, 0);
+  }, 0);
+  const inflightLines = inflightStatus ? 1 : 0;
+
+  const { setCursorPosition } = useCursor();
+  if (!serveDisplay && !loginActive) {
+    setCursorPosition({ x: 3 + cursorCol, y: msgDisplayLines + inflightLines + 1 + cursorRow });
+  } else {
+    setCursorPosition({ x: 0, y: 0 });
+  }
 
   const SIG = "#00c8ff";
   const MX = 3;
@@ -1481,8 +1491,8 @@ function ChatApp({
               <Text color="#ffffff">❯</Text>
               <Box flexDirection="column">
                 {inputVal.length === 0 && cursorPos === 0
-                  ? <Text><Text color="#ffffff">{"\x1b[7m \x1b[0m"}</Text><Text color="#555555">{"type a prompt, /help for commands"}</Text></Text>
-                  : inputLinesWithCursor.map((line, i) => (
+                  ? <Text color="#555555">{"type a prompt, /help for commands"}</Text>
+                  : inputLines.map((line, i) => (
                       <Text key={i} color="#ffffff">{line.length === 0 ? " " : line}</Text>
                     ))
                 }
