@@ -785,18 +785,10 @@ function ChatApp({
           // (terminal-title spoof, OSC 52 clipboard write, etc.).
           // The wire-side `sanitizeLogLine` strips C0 / CSI / OSC.
           for (const f of files) addMsg(`  ⎿ • ${sanitizeLogLine(f)}`, "#6b6b6b");
-          addMsg(`  ⎿ Apply? (y=${fullCost}cr · n=${halfCost}cr · 60s no reply = ${halfCost}cr)`, "#ffcc44");
+          addMsg(`  ⎿ Apply? (y=${fullCost}cr · n=${halfCost}cr)`, "#ffcc44");
 
-          const decision = await new Promise<"y" | "n" | "timeout">((resolve) => {
-            let done = false;
-            const settle = (v: "y" | "n" | "timeout") => {
-              if (done) return;
-              done = true;
-              clearTimeout(t);
-              resolve(v);
-            };
-            confirmResolveRef.current = (apply) => settle(apply ? "y" : "n");
-            const t = setTimeout(() => settle("timeout"), 60_000);
+          const decision = await new Promise<"y" | "n">((resolve) => {
+            confirmResolveRef.current = (apply) => resolve(apply ? "y" : "n");
           });
           confirmResolveRef.current = null;
 
@@ -804,12 +796,9 @@ function ChatApp({
             amount = fullCost;
             applyRequested = true;
             outcomeLabel = "applied";
-          } else if (decision === "n") {
-            amount = halfCost;
-            outcomeLabel = "rejected";
           } else {
             amount = halfCost;
-            outcomeLabel = "timeout";
+            outcomeLabel = "rejected";
           }
         }
 
