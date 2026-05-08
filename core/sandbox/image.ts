@@ -31,6 +31,10 @@ USER sandboxuser
 RUN git config --global user.email "sandbox@agent-share" && \\
     git config --global user.name "Sandbox"
 
+# Pre-configure Claude Code so the first-run onboarding wizard does not block
+# stdin when the container has a TTY but no keyboard attached.
+RUN printf '{"theme":"dark","hasCompletedOnboarding":true}' > ~/.claude.json
+
 ENTRYPOINT ["/bin/sh", "-c"]
 `.trim();
 
