@@ -1099,6 +1099,7 @@ function ChatApp({
           s === "valid" ? "✓ valid" : s === "expired" ? "⚠ expired" : "—";
         addMsgs([
           `user:    ${username}`,
+          `pubkey:  ${cfg.pubkey ?? "—"}`,
           `model:   ${labelFor(currentModelRef.current)}  (${creditsFor(currentModelRef.current)}cr/task)`,
           `balance: ${b} credits`,
           `served:  ${served} tasks`,
@@ -1354,10 +1355,6 @@ function ChatApp({
     setMenuIdx(0);
   };
 
-  // Show only as many messages as fit on screen; the rest silently drop out
-  // of the visible area without corrupting Ink's cursor tracking.
-  const visibleMsgs = msgs.slice(-Math.max(1, termHeight - 8));
-
   const statusDir = process.cwd().replace(homedir(), "~");
   const statusDirShort = statusDir.length > 40 ? "…" + statusDir.slice(-39) : statusDir;
 
@@ -1366,19 +1363,24 @@ function ChatApp({
   const cursorRow = beforeCursor.split("\n").length - 1;
   const cursorCol = stringWidth(beforeCursor.split("\n").pop() ?? "");
 
-  // Count actual terminal lines each message occupies (handles wrapping).
-  // paddingX={1} on message boxes → effective width = termWidth - 2.
-  const effectiveMsgWidth = Math.max(1, termWidth - 2);
-  const msgDisplayLines = visibleMsgs.reduce((total, msg) => {
-    return total + msg.text.split("\n").reduce((n, line) => {
-      return n + Math.max(1, Math.ceil(stringWidth(line) / effectiveMsgWidth));
-    }, 0);
-  }, 0);
-  const inflightLines = inflightStatus ? 1 : 0;
+  // Cursor y anchored to terminal bottom — independent of message count.
+  // Static header occupies 6 rows (topLine + 3 content + bottom border + marginBottom).
+  // Input box = top separator + inputLines + bottom separator at the very bottom of the
+  // fixed-height dynamic area, so cursor row = termHeight - 6 - inputLines.length - 1 + cursorRow.
+  const HEADER_LINES = 6;
+  // Menu/picker below input shifts the input up by their height.
+  const menuHeight = (!loginActive && !serveDisplay)
+    ? pickerActive
+      ? Math.min(models.length, 11) + 1
+      : menuItems.length
+    : 0;
 
   const { setCursorPosition } = useCursor();
   if (!serveDisplay && !loginActive) {
-    setCursorPosition({ x: 3 + cursorCol, y: msgDisplayLines + inflightLines + 1 + cursorRow });
+    setCursorPosition({
+      x: 3 + cursorCol,
+      y: termHeight - HEADER_LINES - inputLines.length - 2 + cursorRow - menuHeight,
+    });
   } else {
     setCursorPosition({ x: 0, y: 0 });
   }
@@ -1415,16 +1417,20 @@ function ChatApp({
         )}
       </Static>
 
-      <Box flexDirection="column">
-        {/* Visible messages — last N that fit on screen. All in the dynamic
-            section so /clear can reset them without raw escape codes. */}
-        {visibleMsgs.map((msg) => (
-          <Box key={msg.id} paddingX={1}>
-            <Text color={msg.color}>{msg.text}</Text>
-          </Box>
-        ))}
+      {/* Fixed-height dynamic area = terminal rows minus the static header.
+          Messages fill available space via flexGrow; yoga clips overflow so
+          the input box is always pinned at the bottom. */}
+      <Box flexDirection="column" height={termHeight - HEADER_LINES}>
+        {/* Messages fill remaining space, latest at bottom; overflow clipped by yoga. */}
+        <Box flexDirection="column" flexGrow={1} justifyContent="flex-end" overflow="hidden">
+          {msgs.map((msg) => (
+            <Box key={msg.id} paddingX={1}>
+              <Text color={msg.color}>{msg.text}</Text>
+            </Box>
+          ))}
+        </Box>
 
-        {/* In-flight task heartbeat: spinner + elapsed time + line count. */}
+        {/* In-flight task heartbeat: spinner + elapsed time. */}
         {inflightStatus && (() => {
           const elapsedS = Math.floor((Date.now() - inflightStatus.startTs) / 1000);
           const mm = Math.floor(elapsedS / 60);
@@ -1502,7 +1508,7 @@ function ChatApp({
           </Box>
         ))}
 
-        {/* Slash-command menu (below input) */}
+        {/* Slash-command menu / model picker — below input, inside fixed-height area. */}
         {!loginActive && !serveDisplay && menuItems.length > 0 && !pickerActive && (
           <Box flexDirection="column" paddingX={2}>
             {menuItems.map((c, i) => (
@@ -1515,8 +1521,6 @@ function ChatApp({
             ))}
           </Box>
         )}
-
-        {/* Model picker (below input) */}
         {!loginActive && !serveDisplay && pickerActive && (
           <Box flexDirection="column" paddingX={2}>
             {models.slice(0, 11).map((m, i) => (
