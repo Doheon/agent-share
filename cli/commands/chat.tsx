@@ -1488,6 +1488,7 @@ function ChatApp({
                 }
               </Box>
             </Box>
+            <Text color="#888888">{"━".repeat(termWidth)}</Text>
           </Box>
         ))}
 
