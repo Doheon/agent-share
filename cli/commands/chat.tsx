@@ -153,7 +153,7 @@ interface ServeModeState {
   stopRequested: boolean;
   active: ActiveTask | null;
   activeStartTs: number | null;
-  activeLineCount: number;
+  activeLastLine: string;
 }
 
 interface ServeDisplay {
@@ -162,6 +162,7 @@ interface ServeDisplay {
   maxTasks: number;
   stopping: boolean;
   busy: boolean;
+  lastLine: string;
 }
 
 const WAITING_TIMEOUT_MS = 60_000;
@@ -265,6 +266,7 @@ function ChatApp({
       maxTasks: sm.maxTasks,
       stopping: sm.stopRequested,
       busy: sm.active !== null,
+      lastLine: sm.activeLastLine,
     });
   }, []);
 
@@ -348,17 +350,16 @@ function ChatApp({
         peer,
       };
       state.activeStartTs = Date.now();
-      state.activeLineCount = 0;
+      state.activeLastLine = "";
       refreshServeDisplay();
 
       const serveLogger = (raw: string): void => {
-        // processTask emits ANSI-wrapped strings with trailing newlines; strip both
-        // for Ink rendering. Lines that become empty after trim are dropped.
         const cleaned = raw.replace(/\x1b\[[0-9;]*m/g, "");
         for (const line of cleaned.split("\n")) {
-          if (line.trim()) {
-            addMsg(`    ${line}`, "#6b6b6b");
-            state.activeLineCount += 1;
+          const trimmed = line.trim();
+          if (trimmed) {
+            state.activeLastLine = trimmed;
+            refreshServeDisplay();
           }
         }
       };
@@ -384,7 +385,7 @@ function ChatApp({
       } finally {
         state.active = null;
         state.activeStartTs = null;
-        state.activeLineCount = 0;
+        state.activeLastLine = "";
         refreshServeDisplay();
       }
 
@@ -951,7 +952,7 @@ function ChatApp({
       stopRequested: false,
       active: null,
       activeStartTs: null,
-      activeLineCount: 0,
+      activeLastLine: "",
     };
 
     const countStr = nArg !== undefined ? `${nArg} tasks` : "unlimited";
@@ -1448,13 +1449,12 @@ function ChatApp({
           if (serveDisplay.busy) {
             const sm = serveModeRef.current;
             const startTs = sm?.activeStartTs ?? Date.now();
-            const lineCount = sm?.activeLineCount ?? 0;
             const elapsedS = Math.floor((Date.now() - startTs) / 1000);
             const mm = Math.floor(elapsedS / 60);
             const ss = elapsedS % 60;
             const timeStr = mm > 0 ? `${mm}m ${String(ss).padStart(2, "0")}s` : `${ss}s`;
-            const lineStr = lineCount > 0 ? ` · ${lineCount} line${lineCount === 1 ? "" : "s"}` : "";
-            runningPart = `${FRAMES[spinFrame]} running · ${timeStr}${lineStr}`;
+            const lastLine = serveDisplay.lastLine ? `  ${serveDisplay.lastLine}` : "";
+            runningPart = `${FRAMES[spinFrame]} running · ${timeStr}${lastLine}`;
           } else if (serveDisplay.stopping) {
             runningPart = "stopping after current…";
           } else {
