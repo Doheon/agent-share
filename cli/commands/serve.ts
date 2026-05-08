@@ -200,8 +200,10 @@ export async function processTask(
   // Any ciphertext substitution from another concurrent task will fail
   // authenticated decryption here.
   const aad = buildTaskAad(active.taskId, active.requesterPubkey);
+  active.peer.send({ type: "task:log", task_id: active.taskId, line: "unpacking workspace…" });
   await unpackToDirectory(ciphertext, aesKeyRaw, iv, workDir, aad);
   await initRepo(workDir);
+  active.peer.send({ type: "task:log", task_id: active.taskId, line: "starting agent…" });
 
   // Run the AI agent in the sandbox. For codex we keep stdout on the acceptor
   // side (banner, streaming delta, token footer, prompt echo) and forward

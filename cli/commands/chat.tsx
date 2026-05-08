@@ -661,7 +661,6 @@ function ChatApp({
     addMsg(`  ⎿ announced  (${taskId.slice(0, 8)})`, "#6b6b6b");
     addMsg(`  ${FRAMES[0]} waiting for acceptor…  (esc to cancel)`, "#6b6b6b");
 
-    let agentStarted = false;
     let agentBuffer = "";
 
     await new Promise<void>((resolve) => {
@@ -722,11 +721,8 @@ function ChatApp({
       };
 
       pendingRef.current!.onLog = (line) => {
-        if (!agentStarted) {
-          updateLastMsg("  ● agent");
-          agentStarted = true;
-        }
-        addMsg(`   ${line}`, "#e8e8e8");
+        const truncated = line.length > 80 ? line.slice(0, 80) + "…" : line;
+        updateLastMsg(`  ● ${truncated}`, "#aaaaaa");
         agentBuffer += line + "\n";
         setInflightStatus((s) => s ? { ...s, lineCount: s.lineCount + 1 } : s);
       };
