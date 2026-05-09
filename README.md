@@ -192,7 +192,7 @@ graph LR
 1. Scans `cwd`, excluding `.gitignore` patterns from all directories, and packs files into a tar archive
 2. Generates a random AES-256-GCM key, encrypts the tar, and announces the task over Hyperswarm
 3. On `task:claim`, encrypts the AES key with the acceptor's RSA-OAEP public key and sends it
-4. Receives the diff, reviews it, and applies the patch if approved
+4. Receives the diff and applies the patch automatically
 5. Signs and sends a spend event; credits are deducted from the local ledger
 
 **Acceptor**
@@ -201,7 +201,7 @@ graph LR
 3. Runs the AI agent (Claude Code or Codex) inside a Docker/Podman container — network restricted to the AI provider only
 4. Extracts a `git diff` of all changes made by the agent
 5. Sends the diff back; temp directory and container are deleted immediately after
-6. On requester approval, signs an earn event; credits are added to the local ledger
+6. Signs an earn event after patch is applied; credits are added to the local ledger
 
 **Key properties:**
 
