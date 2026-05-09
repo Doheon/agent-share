@@ -36,9 +36,9 @@ import {
   getLocalBalance,
   getNextNonce,
 } from "../p2p_state.ts";
-import { settleAsRequester } from "../requester_settle.ts";
+import { settleAsRequester, captureAcceptorSnapshot } from "../requester_settle.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
-import { getEvents, getAdminMintsFor, getRemoteBalance } from "../../core/ledger/events.ts";
+import { getEvents, getAdminMintsFor } from "../../core/ledger/events.ts";
 import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
 import { LEDGER_TOPIC, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
 import { resolveTier } from "../../shared/policy.ts";
@@ -505,27 +505,18 @@ function ChatApp({
           // appended in the interim — and would also diverge from acceptor's
           // local replay if our peer_keys cache holds a stale ledger key.
           if (p.acceptorLedgerKey) {
-            const snap = await getRemoteBalance(
-              p.acceptorLedgerKey,
-              p.acceptorPubkey,
-              5000,
-              msg.admin_core_key,
-              msg.admin_mints ?? [],
-              msg.counterparty_admin_mints ?? [],
-              msg.counterparty_ledger_keys,
-            ).catch(() => null);
-            // Mirror run.ts guard: if the remote core is unreachable or its
-            // length doesn't match the nonce the acceptor claimed in task:claim
-            // (replication lag, or acceptor advanced after sending), abort —
-            // proceeding would stamp an earn_checkpoint nonce that fails our
-            // settle-time validation with "earn-invalid".
-            if (!snap || snap.coreLength !== msg.next_nonce) {
+            const snapResult = await captureAcceptorSnapshot({
+              acceptorLedgerKey: p.acceptorLedgerKey,
+              acceptorPubkey: p.acceptorPubkey,
+              claim: msg,
+            });
+            if (!snapResult.ok) {
               addMsg("  ⎿ acceptor core unreachable or nonce mismatch — task cancelled", "#ff8888");
               peer.send({ type: "task:cancel", task_id: p.taskId });
               p.peerCancel?.();
               return;
             }
-            p.acceptorSnapshot = snap;
+            p.acceptorSnapshot = snapResult.snapshot;
           }
           await p.onMatchPending?.(peer, msg.next_nonce, msg.rsa_public_key);
           break;

@@ -30,7 +30,58 @@ import {
 } from "../shared/events.ts";
 import { splitFee } from "../shared/policy.ts";
 import { appendCheckpointEvent } from "./p2p_state.ts";
+import { getRemoteBalance } from "../core/ledger/events.ts";
 import type { SwarmPeer } from "../core/p2p/swarm.ts";
+
+/**
+ * Subset of `task:claim` we care about for snapshotting. Kept structural so
+ * both `run.ts` (P2PMessage union narrowing) and `chat.tsx` (already typed
+ * msg) can pass their decoded message in directly.
+ */
+export interface AcceptorClaimBundle {
+  next_nonce: number;
+  admin_core_key?: string;
+  admin_mints?: unknown[];
+  counterparty_admin_mints?: unknown[];
+  counterparty_ledger_keys?: Record<string, string>;
+}
+
+export type AcceptorSnapshotResult =
+  | { ok: true; snapshot: { balance: number; coreLength: number } }
+  | { ok: false; reason: "unreachable" | "nonce-mismatch" };
+
+/**
+ * Capture the acceptor's pre-task balance + core length using the authoritative
+ * bundle they shipped in task:claim. Both callers (run.ts, chat.tsx) MUST go
+ * through this so they apply the same overrides and the same length-vs-nonce
+ * guard — drift here is what produced the recurring "earn-invalid" the TUI
+ * hit after the run.ts fix landed.
+ *
+ * Caller is responsible for the side effects on failure (send task:cancel,
+ * surface a user-visible error, terminate the request flow).
+ */
+export async function captureAcceptorSnapshot(opts: {
+  acceptorLedgerKey: string;
+  acceptorPubkey: string;
+  claim: AcceptorClaimBundle;
+  /** Replication wait — defaults to 5s, matching prior inline behaviour. */
+  timeoutMs?: number;
+}): Promise<AcceptorSnapshotResult> {
+  const snap = await getRemoteBalance(
+    opts.acceptorLedgerKey,
+    opts.acceptorPubkey,
+    opts.timeoutMs ?? 5000,
+    opts.claim.admin_core_key,
+    opts.claim.admin_mints ?? [],
+    opts.claim.counterparty_admin_mints ?? [],
+    opts.claim.counterparty_ledger_keys,
+  ).catch(() => null);
+  if (!snap) return { ok: false, reason: "unreachable" };
+  if (snap.coreLength !== opts.claim.next_nonce) {
+    return { ok: false, reason: "nonce-mismatch" };
+  }
+  return { ok: true, snapshot: snap };
+}
 
 export type SettleResolver = (msg: {
   action: "approve" | "reject";

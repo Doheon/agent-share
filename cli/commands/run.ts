@@ -36,8 +36,7 @@ import {
   releasePendingSpend,
   getSpendableBalance,
 } from "../p2p_state.ts";
-import { settleAsRequester } from "../requester_settle.ts";
-import { getRemoteBalance } from "../../core/ledger/events.ts";
+import { settleAsRequester, captureAcceptorSnapshot } from "../requester_settle.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
 import { LEDGER_TOPIC, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
 import { AshSwarm, type SwarmPeer } from "../../core/p2p/swarm.ts";
@@ -230,39 +229,23 @@ export const runCommand = new Command("run")
 
           // Snapshot acceptor's core state before starting work so we can
           // validate the earn checkpoint at settlement without re-replicating.
-          // If the core is unreachable or mismatches next_nonce, cancel now.
+          // captureAcceptorSnapshot encapsulates the admin_mints /
+          // counterparty_admin_mints / counterparty_ledger_keys overrides and
+          // the coreLength === next_nonce guard so the TUI cannot drift from
+          // this CLI path again.
           if (acceptorLedgerKey) {
-            // admin_mints carries the acceptor's admin-signed credit grants. We
-            // verify their signatures locally so we don't need to replicate the
-            // admin Hypercore cross-machine (which is unreliable without a fixed
-            // ADMIN_LEDGER_KEY). This is the primary path; admin_core_key is a
-            // secondary hint used when ADMIN_LEDGER_KEY is configured.
-            // Always pass arrays (not undefined) for both admin_mints and
-            // counterparty_admin_mints. When the acceptor omits these fields,
-            // undefined would fall through to `replayAdminMints` against our
-            // LOCAL admin core, which can diverge from the acceptor's view.
-            // Empty arrays force the verified-set path with 0 mints / empty set,
-            // matching the acceptor's computation byte-for-byte.
-            // Match the acceptor's admin-mint enforcement: pass arrays so
-            // sumVerifiedAdminMints / buildVerifiedMintedPubkeySet are used
-            // instead of falling back to our local admin core (which can
-            // diverge from the acceptor's view across machines).
-            const snap = await getRemoteBalance(
+            const snapResult = await captureAcceptorSnapshot({
               acceptorLedgerKey,
               acceptorPubkey,
-              5000,
-              msg.admin_core_key,
-              msg.admin_mints ?? [],
-              msg.counterparty_admin_mints ?? [],
-              msg.counterparty_ledger_keys,
-            ).catch(() => null);
-            if (!snap || snap.coreLength !== msg.next_nonce) {
+              claim: msg,
+            });
+            if (!snapResult.ok) {
               console.error("  acceptor core unreachable or nonce mismatch — task cancelled");
               peer.send({ type: "task:cancel", task_id: taskId });
               await cleanup(1);
               return;
             }
-            acceptorSnapshot = snap;
+            acceptorSnapshot = snapResult.snapshot;
           }
 
           try {
