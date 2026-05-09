@@ -36,6 +36,7 @@ import { canonicalStringify } from "../../shared/canonical.ts";
 import { eventWithoutSignature, type Event, type MintEvent } from "../../shared/events.ts";
 import { ADMIN_PUBKEY, LEDGER_TOPIC } from "../../shared/constants.ts";
 import { appendEvent, getEventCount, getEvents } from "../../core/ledger/events.ts";
+import { getPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
 import { getCorestore, closeCorestore } from "../../core/ledger/store.ts";
 import { AshSwarm } from "../../core/p2p/swarm.ts";
 import { SIGNUP_BONUS } from "../../shared/policy.ts";
@@ -96,11 +97,12 @@ adminCommand.addCommand(
     .argument("<amount>", "Credits to mint", parseInt)
     .argument("[reason]", "Human-readable reason", "admin grant")
     .option("--wait <ms>", "Milliseconds to wait for replication", parseInt, 5000)
+    .option("--core-key <hex>", "Recipient Hypercore key — binds mint to this core only")
     .action(async (
       recipientPubkey: string,
       amount: number,
       reason: string,
-      opts: { wait: number },
+      opts: { wait: number; coreKey?: string },
     ) => {
       if (!ADMIN_PUBKEY) {
         console.error("\nerror: ADMIN_PUBKEY is not set in shared/constants.ts\n");
@@ -120,12 +122,14 @@ adminCommand.addCommand(
         try {
           nonce = await getEventCount(ADMIN_PUBKEY);
 
+          const coreKey = opts.coreKey ?? await getPeerLedgerKey(recipientPubkey).catch(() => undefined);
           const mintBase = {
             type: "mint" as const,
             nonce,
             timestamp: new Date().toISOString(),
             amount,
             recipient_pubkey: recipientPubkey,
+            ...(coreKey ? { recipient_core_key: coreKey } : {}),
             reason,
             signer_pubkey: ADMIN_PUBKEY,
             signature: "",
@@ -317,12 +321,14 @@ async function appendSignupMint(
       ) return;
     }
     const nonce = await getEventCount(ADMIN_PUBKEY);
+    const recipientCoreKey = await getPeerLedgerKey(recipientPubkey).catch(() => undefined);
     const base = {
       type: "mint" as const,
       nonce,
       timestamp: new Date().toISOString(),
       amount,
       recipient_pubkey: recipientPubkey,
+      ...(recipientCoreKey ? { recipient_core_key: recipientCoreKey } : {}),
       reason: "signup",
       signer_pubkey: ADMIN_PUBKEY,
       signature: "",

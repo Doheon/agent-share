@@ -76,11 +76,10 @@ export async function registerPeerLedgerKey(
   if (!PUBKEY_RE.test(pubkey) || !CORE_KEY_RE.test(coreKeyHex)) return;
 
   const c = await loadCache();
-  // First-seen wins. Without this, a hostile peer could broadcast a
-  // peer:info with a forged ledger_core_key for a known pubkey and
-  // poison the cache so subsequent balance lookups for that pubkey hit
-  // the attacker's core instead of the legitimate one.
-  if (c[pubkey]) return;
+  // Allow overwrite: callers validate msg.requester_pubkey === peer.pubkey
+  // (verified identity) before registering, so a peer can only register their
+  // own core key. Last-seen wins lets legitimate core rotations propagate.
+  if (c[pubkey] === coreKeyHex) return; // no-op if unchanged
   c[pubkey] = coreKeyHex;
   const snapshot = { ...c };
   writeQueue = writeQueue

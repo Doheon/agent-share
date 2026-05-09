@@ -179,19 +179,6 @@ async function verifyEarnCrossRef(
     if (!verifyEd25519(taskPayload, earn.counterparty_task_signature, counterpartyPub)) {
       return false;
     }
-    // Identity binding: the cosigner must be admin-minted (real participant).
-    // Same rationale as the spend-cross-ref path below.
-    // Admin is exempt: it never mints to itself so replayAdminMints(ADMIN_PUBKEY)=0.
-    if (ADMIN_PUBKEY && earn.counterparty_pubkey !== ADMIN_PUBKEY) {
-      const mintCacheKey = `__mints__:${earn.counterparty_pubkey}`;
-      let cpMints = coreCache.get(mintCacheKey) as number | undefined;
-      if (cpMints === undefined) {
-        cpMints = await replayAdminMints(earn.counterparty_pubkey);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        coreCache.set(mintCacheKey, cpMints as any);
-      }
-      if (cpMints <= 0) return false;
-    }
     return true;
   }
 
@@ -316,7 +303,7 @@ async function openAdminCore(): Promise<any | null> {
   return getUserCore(ADMIN_PUBKEY);
 }
 
-async function replayAdminMints(recipientPubkey: string): Promise<number> {
+async function replayAdminMints(recipientPubkey: string, recipientCoreKeyHex?: string): Promise<number> {
   if (!ADMIN_PUBKEY) return 0;
   try {
     const adminCore = await openAdminCore();
@@ -357,6 +344,9 @@ async function replayAdminMints(recipientPubkey: string): Promise<number> {
           adminPubKey,
         );
         if (!valid) continue;
+        // Core binding: if the mint names a specific core, reject it when read from a different core.
+        // Mints without recipient_core_key (pre-binding) are accepted on any core for backward compat.
+        if (event.recipient_core_key && recipientCoreKeyHex && event.recipient_core_key !== recipientCoreKeyHex) continue;
         if (event.reason === "signup") {
           if (signupCounted) continue;
           signupCounted = true;
@@ -473,7 +463,8 @@ export async function getLocalBalance(ownerPubkeyHex: string): Promise<number> {
     return replayBalance(core, ownerPubkeyHex, checkpoint.balance, checkpoint.nonce + 1);
   }
   // No checkpoint yet: full replay for backward compat with pre-checkpoint cores.
-  const mints = await replayAdminMints(ownerPubkeyHex);
+  const coreKeyHex = (core.key as Buffer).toString("hex");
+  const mints = await replayAdminMints(ownerPubkeyHex, coreKeyHex);
   return replayBalance(core, ownerPubkeyHex, mints);
 }
 
@@ -529,7 +520,7 @@ export async function getRemoteBalance(
     return { balance, coreLength };
   }
   // Fallback: full replay for pre-checkpoint cores or peers that never transacted.
-  const mints = await replayAdminMints(recipientPubkey);
+  const mints = await replayAdminMints(recipientPubkey, coreKeyHex);
   return { balance: await replayBalance(core, recipientPubkey, mints), coreLength };
 }
 

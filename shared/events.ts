@@ -158,7 +158,8 @@ export interface TaskAcceptedEvent extends EventBase {
 
 export interface MintEvent extends EventBase {
   type: "mint";
-  recipient_pubkey: string;   // Ed25519 hex — who receives the credits
+  recipient_pubkey: string;    // Ed25519 hex — who receives the credits
+  recipient_core_key?: string; // Hypercore hex key — when present, mint is only valid on this core
   amount: number;
   reason: string;
 }
