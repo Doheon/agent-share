@@ -254,6 +254,12 @@ export const runCommand = new Command("run")
           resolveSettle?.({ action: msg.action, requester_checkpoint_cosig: msg.requester_checkpoint_cosig, acceptor_earn_checkpoint: msg.acceptor_earn_checkpoint });
           break;
         }
+        case "task:cancel": {
+          if (msg.task_id !== taskId || peer.id !== acceptorPeer?.id) return;
+          console.error("  acceptor cancelled task");
+          await cleanup(1);
+          break;
+        }
       }
     });
 
