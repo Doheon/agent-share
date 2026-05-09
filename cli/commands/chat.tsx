@@ -37,10 +37,9 @@ import {
   getLedgerCoreKey,
   getLocalBalance,
   getNextNonce,
-  getRemotePeerBalance,
 } from "../p2p_state.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
-import { getEvents, getAdminMintsFor } from "../../core/ledger/events.ts";
+import { getEvents, getAdminMintsFor, getRemoteBalance } from "../../core/ledger/events.ts";
 import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
 import { LEDGER_TOPIC, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
 import { resolveTier, splitFee } from "../../shared/policy.ts";
@@ -122,6 +121,12 @@ interface PendingTask {
   acceptorPeer: SwarmPeer | null;
   acceptorPubkey: string | null;
   acceptorLedgerKey: string | null;
+  // Snapshot of acceptor's pre-task balance + core length, captured at task:claim
+  // using admin_mints / counterparty_admin_mints / counterparty_ledger_keys shipped
+  // by the acceptor. Used to validate earn_checkpoint at settle time without a
+  // live remote read (which would diverge from the acceptor's local replay if
+  // peer_keys / replication state has drifted in the interim).
+  acceptorSnapshot: { balance: number; coreLength: number } | null;
   announce?: Extract<P2PMessage, { type: "task:announce" }>;
   onMatchPending?: (peer: SwarmPeer, claimNonce: number, rsaPubPem: string) => Promise<void>;
   onLog?: (line: string, historyOnly?: boolean) => void;
@@ -494,6 +499,23 @@ function ChatApp({
           p.acceptorPeer = peer;
           p.acceptorPubkey = msg.acceptor_pubkey;
           p.acceptorLedgerKey = msg.acceptor_ledger_key ?? null;
+          // Snapshot acceptor's balance NOW using the authoritative bundle the
+          // acceptor shipped (admin_mints / counterparty_admin_mints /
+          // counterparty_ledger_keys). Without this the earn-checkpoint balance
+          // check at settle time would race against any other earn the acceptor
+          // appended in the interim — and would also diverge from acceptor's
+          // local replay if our peer_keys cache holds a stale ledger key.
+          if (p.acceptorLedgerKey) {
+            p.acceptorSnapshot = await getRemoteBalance(
+              p.acceptorLedgerKey,
+              p.acceptorPubkey,
+              5000,
+              msg.admin_core_key,
+              msg.admin_mints ?? [],
+              msg.counterparty_admin_mints ?? [],
+              msg.counterparty_ledger_keys,
+            ).catch(() => null);
+          }
           await p.onMatchPending?.(peer, msg.next_nonce, msg.rsa_public_key);
           break;
         case "task:blob_request": {
@@ -675,6 +697,7 @@ function ChatApp({
       taskId, ciphertextB64, ivB64, aesKeyRaw: aesKeyRaw!,
       prompt, cost,
       acceptorPeer: null, acceptorPubkey: null, acceptorLedgerKey: null,
+      acceptorSnapshot: null,
     };
 
     const requesterLedgerKey = await getLedgerCoreKey(userId).catch(() => undefined);
@@ -860,21 +883,16 @@ function ChatApp({
           if (!cosigOk) throw new Error("cosig-invalid");
 
           // Validate earn checkpoint BEFORE spend append (settlement ordering).
-          // Hard-reject if ledger key missing or replication fails — mirrors the
-          // acceptor-side balanceLookupOk pattern (C-2/C-3 fix).
+          // Use acceptorSnapshot captured at task:claim (with the authoritative
+          // mints / ledger-key bundle from the acceptor) instead of a live read
+          // here — a fresh read could see an updated balance/length if the
+          // acceptor appended other earns in the meantime, and would also
+          // recompute against our possibly-stale peer_keys cache.
           const aec = settleMsg.acceptor_earn_checkpoint;
           if (!aec) throw new Error("earn-missing");
           if (!p.acceptorLedgerKey) throw new Error("earn-no-ledger-key");
+          if (!p.acceptorSnapshot) throw new Error("earn-no-snapshot");
           const expectedAcceptorEarn = splitFee(amount).acceptor;
-          let earnLookupOk = false;
-          let prevAcceptorBalance = 0;
-          let acceptorCoreLength = -1;
-          try {
-            const aecInfo = await getRemotePeerBalance(p.acceptorLedgerKey, p.acceptorPubkey!);
-            prevAcceptorBalance = aecInfo.balance;
-            acceptorCoreLength = aecInfo.coreLength;
-            earnLookupOk = true;
-          } catch { /* replication failed — hard reject */ }
           let aecSigOk = false;
           try {
             aecSigOk = verifyEd25519(
@@ -884,14 +902,13 @@ function ChatApp({
             );
           } catch { /* malformed */ }
           const aecValid =
-            earnLookupOk &&
-            aec.nonce === acceptorCoreLength &&
-            aec.balance === prevAcceptorBalance + expectedAcceptorEarn &&
             aec.type === "earn_checkpoint" &&
             aec.task_id === taskId &&
             aec.amount === expectedAcceptorEarn &&
             aec.counterparty_pubkey === userId &&
             aec.owner_pubkey === p.acceptorPubkey &&
+            aec.nonce === p.acceptorSnapshot.coreLength &&
+            aec.balance === p.acceptorSnapshot.balance + expectedAcceptorEarn &&
             aecSigOk;
           if (!aecValid) throw new Error("earn-invalid");
           settleEarnCheckpoint = aec;
@@ -908,7 +925,7 @@ function ChatApp({
             addMsg("  ⎿ acceptor missing spend cosig — no credits charged", "#e3bd5a");
           } else if (msg === "cosig-invalid") {
             addMsg("  ⎿ acceptor spend cosig invalid — no credits charged", "#e3bd5a");
-          } else if (msg === "earn-missing" || msg === "earn-no-ledger-key" || msg === "earn-invalid") {
+          } else if (msg === "earn-missing" || msg === "earn-no-ledger-key" || msg === "earn-no-snapshot" || msg === "earn-invalid") {
             addMsg("  ⎿ acceptor earn checkpoint invalid — no earn cosign sent", "#e3bd5a");
           } else {
             addMsg(`  ⎿ local spend log failed: ${msg}`, "#ff8888");

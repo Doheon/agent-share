@@ -443,7 +443,7 @@ export const runCommand = new Command("run")
           console.log("  acceptor missing spend cosig — no credits charged");
         } else if (msg === "cosig-invalid") {
           console.log("  acceptor spend cosig invalid — no credits charged");
-        } else if (msg === "earn-missing" || msg === "earn-no-ledger-key" || msg === "earn-invalid") {
+        } else if (msg === "earn-missing" || msg === "earn-no-ledger-key" || msg === "earn-no-snapshot" || msg === "earn-invalid") {
           console.log("  acceptor earn checkpoint invalid — no earn cosign sent");
         } else {
           console.error(`  local spend log failed: ${msg}`);
