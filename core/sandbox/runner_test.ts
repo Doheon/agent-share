@@ -15,7 +15,7 @@ import { buildAgentCommand, networkMode } from "./runner.ts";
 // ─── buildAgentCommand: claude ────────────────────────────────────────────────
 
 const CLAUDE_CMD =
-  `export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/agent-token)" && claude --dangerously-skip-permissions < /task/prompt.txt`;
+  `export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/agent-token)" && claude --dangerously-skip-permissions --print --output-format stream-json --verbose < /task/prompt.txt`;
 
 test("buildAgentCommand for claude uses stdin redirection from /task/prompt.txt", () => {
   const cmd = buildAgentCommand("claude");
