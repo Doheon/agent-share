@@ -313,18 +313,7 @@ function ChatApp({
         peer.send(p.announce);
       }
     });
-    const unsubDisconnect = swarm.onDisconnect((peerId) => {
-      setPeerCount(swarm.getPeers().length);
-      const p = pendingRef.current;
-      if (!p || p.acceptorPeer?.id !== peerId) return;
-      // Acceptor peer dropped while task was in flight — unblock confirm/settle
-      // so the user doesn't get permanently locked out of running new tasks.
-      addMsg("  ⎿ acceptor disconnected — task aborted", "#ff8888");
-      if (confirmResolveRef.current) {
-        confirmResolveRef.current(true);
-        confirmResolveRef.current = null;
-      }
-    });
+    const unsubDisconnect = swarm.onDisconnect(() => setPeerCount(swarm.getPeers().length));
 
     const claimAndProcess = async (
       peer: SwarmPeer,
@@ -559,13 +548,7 @@ function ChatApp({
           break;
         case "task:settle":
           if (msg.task_id !== p.taskId || peer.id !== p.acceptorPeer?.id) return;
-          if (p.resolveSettle) {
-            p.resolveSettle({ action: msg.action, requester_checkpoint_cosig: msg.requester_checkpoint_cosig, acceptor_earn_checkpoint: msg.acceptor_earn_checkpoint });
-          } else if (msg.action === "reject" && confirmResolveRef.current) {
-                  addMsg("  ⎿ acceptor timed out — no credits charged", "#e3bd5a");
-            confirmResolveRef.current(true);
-            confirmResolveRef.current = null;
-          }
+          p.resolveSettle?.({ action: msg.action, requester_checkpoint_cosig: msg.requester_checkpoint_cosig, acceptor_earn_checkpoint: msg.acceptor_earn_checkpoint });
           break;
       }
     });
