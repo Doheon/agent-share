@@ -505,7 +505,7 @@ function ChatApp({
           // appended in the interim — and would also diverge from acceptor's
           // local replay if our peer_keys cache holds a stale ledger key.
           if (p.acceptorLedgerKey) {
-            p.acceptorSnapshot = await getRemoteBalance(
+            const snap = await getRemoteBalance(
               p.acceptorLedgerKey,
               p.acceptorPubkey,
               5000,
@@ -514,6 +514,18 @@ function ChatApp({
               msg.counterparty_admin_mints ?? [],
               msg.counterparty_ledger_keys,
             ).catch(() => null);
+            // Mirror run.ts guard: if the remote core is unreachable or its
+            // length doesn't match the nonce the acceptor claimed in task:claim
+            // (replication lag, or acceptor advanced after sending), abort —
+            // proceeding would stamp an earn_checkpoint nonce that fails our
+            // settle-time validation with "earn-invalid".
+            if (!snap || snap.coreLength !== msg.next_nonce) {
+              addMsg("  ⎿ acceptor core unreachable or nonce mismatch — task cancelled", "#ff8888");
+              peer.send({ type: "task:cancel", task_id: p.taskId });
+              p.peerCancel?.();
+              return;
+            }
+            p.acceptorSnapshot = snap;
           }
           await p.onMatchPending?.(peer, msg.next_nonce, msg.rsa_public_key);
           break;
@@ -1129,6 +1141,10 @@ function ChatApp({
             addMsg(`  ${ts}  earn   +${String(evt.amount).padStart(4)} cr  from ${evt.counterparty_pubkey.slice(0, 8)}…`, "#7cd38a");
           } else if (evt.type === "spend") {
             addMsg(`  ${ts}  spend  -${String(evt.amount).padStart(4)} cr  to   ${evt.counterparty_pubkey.slice(0, 8)}…`, "#e3bd5a");
+          } else if (evt.type === "earn_checkpoint") {
+            addMsg(`  ${ts}  earn   +${String(evt.amount).padStart(4)} cr  from ${evt.counterparty_pubkey.slice(0, 8)}…  (bal: ${evt.balance})`, "#7cd38a");
+          } else if (evt.type === "spend_checkpoint") {
+            addMsg(`  ${ts}  spend  -${String(evt.amount).padStart(4)} cr  to   ${evt.counterparty_pubkey.slice(0, 8)}…  (bal: ${evt.balance})`, "#e3bd5a");
           } else if (evt.type === "mint") {
             addMsg(`  ${ts}  mint   +${String(evt.amount).padStart(4)} cr  admin  (${evt.reason})`, "#88ccff");
           }
