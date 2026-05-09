@@ -132,9 +132,7 @@ interface PendingTask {
   cancel?: (reason?: "user" | "timeout") => void;
   // Called when the acceptor sends task:cancel (e.g. blob transfer timeout).
   peerCancel?: () => void;
-  // Set when the acceptor peer disconnects mid-task so the settle promise
-  // can fast-reject instead of waiting 30 s.
-  peerDisconnected?: boolean;
+
 }
 
 interface Turn {
@@ -321,13 +319,11 @@ function ChatApp({
       if (!p || p.acceptorPeer?.id !== peerId) return;
       // Acceptor peer dropped while task was in flight — unblock confirm/settle
       // so the user doesn't get permanently locked out of running new tasks.
-      p.peerDisconnected = true;
       addMsg("  ⎿ acceptor disconnected — task aborted", "#ff8888");
       if (confirmResolveRef.current) {
         confirmResolveRef.current(true);
         confirmResolveRef.current = null;
       }
-      p.resolveSettle?.({ action: "reject" });
     });
 
     const claimAndProcess = async (
@@ -566,8 +562,7 @@ function ChatApp({
           if (p.resolveSettle) {
             p.resolveSettle({ action: msg.action, requester_checkpoint_cosig: msg.requester_checkpoint_cosig, acceptor_earn_checkpoint: msg.acceptor_earn_checkpoint });
           } else if (msg.action === "reject" && confirmResolveRef.current) {
-            p.peerDisconnected = true;
-            addMsg("  ⎿ acceptor timed out — no credits charged", "#e3bd5a");
+                  addMsg("  ⎿ acceptor timed out — no credits charged", "#e3bd5a");
             confirmResolveRef.current(true);
             confirmResolveRef.current = null;
           }
@@ -861,7 +856,7 @@ function ChatApp({
               resolve(v);
             };
             p.resolveSettle = settle;
-            const t = setTimeout(() => settle({ action: "reject" }), p.peerDisconnected ? 0 : 30_000);
+            const t = setTimeout(() => settle({ action: "reject" }), 30_000);
           });
           p.resolveSettle = undefined;
 
