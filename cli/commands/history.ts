@@ -11,7 +11,7 @@ import { getEvents, getAdminMintsFor } from "../../core/ledger/events.ts";
 import { closeLocalStore, getLocalBalance } from "../p2p_state.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
 import { LEDGER_TOPIC } from "../../shared/constants.ts";
-import type { EarnEvent, SpendEvent, MintEvent } from "../../shared/events.ts";
+import type { EarnEvent, SpendEvent, MintEvent, SpendCheckpointEvent, EarnCheckpointEvent } from "../../shared/events.ts";
 
 export const historyCommand = new Command("history")
   .description("Show event history (earn/spend/mint)")
@@ -73,6 +73,12 @@ export const historyCommand = new Command("history")
         } else if (evt.type === "spend") {
           const e = evt as SpendEvent;
           console.log(`  ${ts}  spend  -${String(e.amount).padStart(4)} cr  to   ${e.counterparty_pubkey.slice(0, 8)}…`);
+        } else if (evt.type === "earn_checkpoint") {
+          const e = evt as EarnCheckpointEvent;
+          console.log(`  ${ts}  earn   +${String(e.amount).padStart(4)} cr  from ${e.counterparty_pubkey.slice(0, 8)}…  (bal: ${e.balance})`);
+        } else if (evt.type === "spend_checkpoint") {
+          const e = evt as SpendCheckpointEvent;
+          console.log(`  ${ts}  spend  -${String(e.amount).padStart(4)} cr  to   ${e.counterparty_pubkey.slice(0, 8)}…  (bal: ${e.balance})`);
         } else if (evt.type === "mint") {
           const e = evt as MintEvent;
           console.log(`  ${ts}  mint   +${String(e.amount).padStart(4)} cr  admin  (${e.reason})`);

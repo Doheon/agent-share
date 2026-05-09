@@ -6,6 +6,10 @@
  * credits before tasks are accepted.
  */
 
+// NOTE: PROTOCOL_VERSION intentionally held at 1 during checkpoint migration.
+// The new spend/earn checkpoint wire fields are backward-compatible at the message
+// layer (isValidMessage rejects old-format messages safely), and the version bump
+// is deferred to the next release cut. See CLAUDE.md for the bump policy.
 export const PROTOCOL_VERSION = 1 as const;
 export const CLIENT_VERSION = "0.1.6" as const;
 

@@ -101,16 +101,45 @@ export async function appendNextEvent(
   return work;
 }
 
+/**
+ * Atomic "read balance + nonce → build checkpoint → append" for a pubkey.
+ * Both balance and nonce are read inside the per-pubkey mutex so the checkpoint's
+ * `balance` field is consistent with the core length at append time. The build
+ * function may do async I/O (including network waits) while holding the lock —
+ * this serialises checkpoint settlements for the same pubkey, which is correct
+ * and prevents two concurrent tasks from stamping the same stale balance.
+ */
+export async function appendCheckpointEvent(
+  pubkey: string,
+  build: (nonce: number, balance: number) => Event | Promise<Event>,
+): Promise<void> {
+  const prev = appendLockByPubkey.get(pubkey) ?? Promise.resolve();
+  const work = prev
+    .catch(() => undefined)
+    .then(async () => {
+      const nonce = await getEventCount(pubkey);
+      const balance = await _getLocalBalance(pubkey);
+      const event = await build(nonce, balance);
+      await appendEvent(pubkey, event);
+    });
+  appendLockByPubkey.set(pubkey, work.catch(() => undefined));
+  return work;
+}
+
 /** Returns the hex key of the given owner's event Hypercore (for peer announcements). */
 export async function getLedgerCoreKey(pubkey: string): Promise<string> {
   return getCoreKey(pubkey);
 }
 
 /**
- * Returns the balance for a remote peer by replaying their replicated Hypercore.
- * Waits up to 4 s for replication to settle before computing.
+ * Returns the balance and replicated core length for a remote peer.
+ * The coreLength is the peer's Hypercore.length after replication — use it to
+ * validate that an incoming checkpoint's nonce equals the expected next position.
  */
-export async function getRemotePeerBalance(coreKeyHex: string, recipientPubkey: string): Promise<number> {
+export async function getRemotePeerBalance(
+  coreKeyHex: string,
+  recipientPubkey: string,
+): Promise<{ balance: number; coreLength: number }> {
   return getRemoteBalance(coreKeyHex, recipientPubkey);
 }
 

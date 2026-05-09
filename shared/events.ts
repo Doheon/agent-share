@@ -12,6 +12,8 @@ export type EventType =
   | "signup_bonus"
   | "earn"
   | "spend"
+  | "spend_checkpoint"
+  | "earn_checkpoint"
   | "mint"
   | "policy_update"
   | "task_created"
@@ -73,6 +75,38 @@ export interface SpendEvent extends EventBase {
   task_id: string;
   counterparty_pubkey: string;
   counterparty_task_signature: string;
+}
+
+// --- checkpoint events (bilateral signed, replace earn/spend for balance tracking) ---
+
+/**
+ * Appended to the requester's core after a task is settled.
+ * Both parties sign the same canonical payload (excluding signature fields).
+ * balance = absolute balance after this spend (includes admin mints).
+ */
+export interface SpendCheckpointEvent extends EventBase {
+  type: "spend_checkpoint";
+  balance: number;
+  task_id: string;
+  amount: number;
+  counterparty_pubkey: string;
+  owner_pubkey: string;
+  sig_counterparty: string; // acceptor's cosignature
+}
+
+/**
+ * Appended to the acceptor's core after a task is settled.
+ * Both parties sign the same canonical payload (excluding signature fields).
+ * balance = absolute balance after this earn (includes admin mints).
+ */
+export interface EarnCheckpointEvent extends EventBase {
+  type: "earn_checkpoint";
+  balance: number;
+  task_id: string;
+  amount: number;
+  counterparty_pubkey: string;
+  owner_pubkey: string;
+  sig_counterparty: string; // requester's cosignature
 }
 
 // --- task events in requester's log ---
@@ -143,6 +177,8 @@ export type Event =
   | SignupBonusEvent
   | EarnEvent
   | SpendEvent
+  | SpendCheckpointEvent
+  | EarnCheckpointEvent
   | MintEvent
   | PolicyUpdateEvent
   | TaskCreatedEvent
@@ -157,4 +193,16 @@ export type Event =
 export function eventWithoutSignature<T extends EventBase>(event: T): Omit<T, "signature"> {
   const { signature: _sig, ...rest } = event;
   return rest as Omit<T, "signature">;
+}
+
+/**
+ * Returns the canonical payload both parties sign for a checkpoint event.
+ * Strips both `signature` (owner sig) and `sig_counterparty` so the payload
+ * is identical regardless of signing order.
+ */
+export function checkpointPayload<T extends EventBase & { sig_counterparty: string }>(
+  event: T,
+): Omit<T, "signature" | "sig_counterparty"> {
+  const { signature: _s, sig_counterparty: _c, ...rest } = event;
+  return rest as Omit<T, "signature" | "sig_counterparty">;
 }

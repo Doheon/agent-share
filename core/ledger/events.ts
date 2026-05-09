@@ -9,8 +9,8 @@
 
 import { getCorestore } from "./store.ts";
 import { getPeerLedgerKey } from "./peer_keys.ts";
-import type { Event } from "../../shared/events.ts";
-import { eventWithoutSignature } from "../../shared/events.ts";
+import type { Event, SpendCheckpointEvent, EarnCheckpointEvent } from "../../shared/events.ts";
+import { eventWithoutSignature, checkpointPayload } from "../../shared/events.ts";
 import { ADMIN_PUBKEY, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
 import { verifyEd25519, rawHexToPublicKey } from "../crypto/ed25519.ts";
 import { canonicalStringify } from "../../shared/canonical.ts";
@@ -65,8 +65,10 @@ export async function appendEvent(ownerPubkeyHex: string, event: Event): Promise
 // injecting it here lets the spend underflow guard compare against the
 // real available balance instead of 0 (which would drop every spend that
 // lands before the first earn — see the /status vs /history mismatch bug).
+// `startIndex` allows partial replay from a known-good checkpoint position,
+// so post-checkpoint legacy events (e.g. mine EarnEvents) are still counted.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function replayBalance(core: any, ownerPubkeyHex: string, startingBalance = 0): Promise<number> {
+async function replayBalance(core: any, ownerPubkeyHex: string, startingBalance = 0, startIndex = 0): Promise<number> {
   let balance = startingBalance;
   const len: number = core.length;
   let ownerPubKey: ReturnType<typeof rawHexToPublicKey> | null = null;
@@ -86,7 +88,7 @@ async function replayBalance(core: any, ownerPubkeyHex: string, startingBalance 
   // so a sign-then-retry race could land two identical SpendEvents in
   // the log. Without this dedupe the user would be double-debited.
   const seenSpendNonces = new Set<number>();
-  for (let i = 0; i < len; i++) {
+  for (let i = startIndex; i < len; i++) {
     try {
       const raw = await core.get(i) as string;
       const event = JSON.parse(raw) as Event;
@@ -178,7 +180,8 @@ async function verifyEarnCrossRef(
     }
     // Identity binding: the cosigner must be admin-minted (real participant).
     // Same rationale as the spend-cross-ref path below.
-    if (ADMIN_PUBKEY) {
+    // Admin is exempt: it never mints to itself so replayAdminMints(ADMIN_PUBKEY)=0.
+    if (ADMIN_PUBKEY && earn.counterparty_pubkey !== ADMIN_PUBKEY) {
       const mintCacheKey = `__mints__:${earn.counterparty_pubkey}`;
       let cpMints = coreCache.get(mintCacheKey) as number | undefined;
       if (cpMints === undefined) {
@@ -215,7 +218,8 @@ async function verifyEarnCrossRef(
   //
   // Memoized via coreCache so a log with N earns from the same counterparty
   // doesn't rescan the admin core N times.
-  if (ADMIN_PUBKEY) {
+  // Admin is exempt: it never mints to itself so replayAdminMints(ADMIN_PUBKEY)=0.
+  if (ADMIN_PUBKEY && earn.counterparty_pubkey !== ADMIN_PUBKEY) {
     const mintCacheKey = `__mints__:${earn.counterparty_pubkey}`;
     let cpMints = coreCache.get(mintCacheKey) as number | undefined;
     if (cpMints === undefined) {
@@ -365,10 +369,110 @@ async function replayAdminMints(recipientPubkey: string): Promise<number> {
   }
 }
 
+/**
+ * Reads the latest verified checkpoint block from a core (O(1) in the common case).
+ * Scans backwards from the tail; skips blocks that fail signature or identity checks.
+ *
+ * Security invariants enforced per block:
+ *   1. owner_pubkey === ownerPubkeyHex — prevents cross-core replay where an attacker
+ *      copies another user's checkpoint into their own core to claim a higher balance.
+ *   2. Owner Ed25519 signature over checkpointPayload(event) — prevents tampering with
+ *      the balance field after the checkpoint was co-signed.
+ *   3. Counterparty cosignature over the same payload — prevents a user from generating
+ *      a self-cosigned checkpoint with a disposable key.
+ *   4. Counterparty must have at least one admin MintEvent — closes the attack where an
+ *      attacker controls a throwaway identity Y, signs a fake inflated checkpoint with Y,
+ *      and presents it as a legitimate counterparty cosignature.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getLatestCheckpoint(core: any, ownerPubkeyHex: string): Promise<SpendCheckpointEvent | EarnCheckpointEvent | null> {
+  let ownerPubKey: ReturnType<typeof rawHexToPublicKey> | null = null;
+  try {
+    ownerPubKey = rawHexToPublicKey(ownerPubkeyHex);
+  } catch {
+    return null;
+  }
+
+  const len: number = core.length ?? 0;
+  let mintCache: Map<string, number> | undefined;
+  for (let i = len - 1; i >= 0; i--) {
+    try {
+      const raw = await core.get(i, { wait: false }) as string | null;
+      if (raw == null) continue;
+      const ev = JSON.parse(raw) as Event;
+      if (ev.type !== "spend_checkpoint" && ev.type !== "earn_checkpoint") continue;
+
+      const checkpoint = ev as SpendCheckpointEvent | EarnCheckpointEvent;
+
+      // Reject non-finite or non-integer numeric fields — NaN/Infinity would
+      // propagate through balance comparisons and silently break downstream gates
+      // (e.g. `requesterBalance < expectedCost` is always false when balance is NaN).
+      if (!Number.isFinite(checkpoint.balance) || !Number.isInteger(checkpoint.balance)) continue;
+      if (!Number.isFinite(checkpoint.amount) || !Number.isInteger(checkpoint.amount) || checkpoint.amount < 0) continue;
+
+      // (0) Position binding: nonce must equal the block index. Without this an attacker
+      //     could append a legitimately-cosigned old checkpoint (nonce=5, balance=100) at
+      //     a later index (e.g., 8) to roll their balance back after spending.
+      if (checkpoint.nonce !== i) continue;
+
+      // (1) Owner binding: reject checkpoints belonging to a different identity.
+      if (checkpoint.owner_pubkey !== ownerPubkeyHex) continue;
+
+      // (2) Verify owner signature over canonical payload (both sig fields stripped).
+      const payload = canonicalStringify(checkpointPayload(checkpoint));
+      if (!verifyEd25519(payload, checkpoint.signature, ownerPubKey)) continue;
+
+      // (3) Verify counterparty cosignature over the same payload.
+      let counterpartyPubKey: ReturnType<typeof rawHexToPublicKey>;
+      try {
+        counterpartyPubKey = rawHexToPublicKey(checkpoint.counterparty_pubkey);
+      } catch {
+        continue;
+      }
+      if (!verifyEd25519(payload, checkpoint.sig_counterparty, counterpartyPubKey)) continue;
+
+      // (4) Identity binding: counterparty must be admin-minted (Sybil filter).
+      //     Cache per-pubkey to avoid O(n × admin_log_size) when scanning many blocks.
+      //
+      //     NOTE (not a bug): this only blocks accounts that have never been minted at all.
+      //     Two colluding admin-minted users could theoretically self-cosign fake checkpoints,
+      //     but that requires admin to have minted both identities. The bilateral cosig (3)
+      //     plus nonce position binding (0) are the primary tamper-proof anchors; this check
+      //     is a supplementary Sybil filter.
+      //
+      //     Admin itself is exempt: admin never mints credits to its own pubkey, so
+      //     replayAdminMints(ADMIN_PUBKEY) returns 0 and the check would wrongly reject
+      //     checkpoints where admin is a legitimate counterparty.
+      if (ADMIN_PUBKEY && checkpoint.counterparty_pubkey !== ADMIN_PUBKEY) {
+        if (mintCache === undefined) mintCache = new Map<string, number>();
+        let cpMints = mintCache.get(checkpoint.counterparty_pubkey);
+        if (cpMints === undefined) {
+          cpMints = await replayAdminMints(checkpoint.counterparty_pubkey);
+          mintCache.set(checkpoint.counterparty_pubkey, cpMints);
+        }
+        if (cpMints <= 0) continue;
+      }
+
+      return checkpoint;
+    } catch { /* skip malformed */ }
+  }
+  return null;
+}
+
 /** Returns the balance for the given owner by replaying their local Hypercore. */
 export async function getLocalBalance(ownerPubkeyHex: string): Promise<number> {
-  const mints = await replayAdminMints(ownerPubkeyHex);
   const core = await getUserCore(ownerPubkeyHex);
+  const checkpoint = await getLatestCheckpoint(core, ownerPubkeyHex);
+  if (checkpoint !== null) {
+    // Fast path: checkpoint.balance is the base. Replay any legacy earn/spend events
+    // appended after the checkpoint nonce (e.g. mine EarnEvents from mine.ts via
+    // appendNextEvent). Admin mints are already baked into checkpoint.balance at
+    // settlement time; any additional admin mint issued after the checkpoint is
+    // reflected in the next settlement's checkpoint (v0.1 has signup-only mints).
+    return replayBalance(core, ownerPubkeyHex, checkpoint.balance, checkpoint.nonce + 1);
+  }
+  // No checkpoint yet: full replay for backward compat with pre-checkpoint cores.
+  const mints = await replayAdminMints(ownerPubkeyHex);
   return replayBalance(core, ownerPubkeyHex, mints);
 }
 
@@ -385,7 +489,7 @@ export async function getRemoteBalance(
   coreKeyHex: string,
   recipientPubkey: string,
   timeoutMs = 8000,
-): Promise<number> {
+): Promise<{ balance: number; coreLength: number }> {
   const store = await getCorestore();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const core: any = store.get(
@@ -394,7 +498,7 @@ export async function getRemoteBalance(
   );
   await core.ready();
 
-  const updates: Promise<void>[] = [core.update()];
+  const updates: Promise<void>[] = [core.update().catch(() => undefined)];
   if (ADMIN_PUBKEY) {
     updates.push(
       openAdminCore()
@@ -409,8 +513,23 @@ export async function getRemoteBalance(
     new Promise<void>((r) => setTimeout(r, timeoutMs)),
   ]);
 
+  // Capture length after replication so callers can validate incoming nonces.
+  const coreLength: number = core.length ?? 0;
+
+  // Fast-path: checkpoint balance + post-checkpoint deltas (mirrors getLocalBalance logic).
+  // Both paths must be byte-identical so bilateral `prev ± amount === proposed.balance`
+  // checks are sound regardless of which side reads local vs remote.
+  const checkpoint = await getLatestCheckpoint(core, recipientPubkey);
+  if (checkpoint !== null) {
+    // Admin mints are baked into checkpoint.balance at settlement time; no extra mint
+    // addition here. Mirrors getLocalBalance fast-path exactly so bilateral
+    // `prev ± amount === proposed.balance` checks are sound.
+    const balance = await replayBalance(core, recipientPubkey, checkpoint.balance, checkpoint.nonce + 1);
+    return { balance, coreLength };
+  }
+  // Fallback: full replay for pre-checkpoint cores or peers that never transacted.
   const mints = await replayAdminMints(recipientPubkey);
-  return replayBalance(core, recipientPubkey, mints);
+  return { balance: await replayBalance(core, recipientPubkey, mints), coreLength };
 }
 
 /** Returns all raw events from the owner's own Hypercore (earn/spend). */

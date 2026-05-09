@@ -6,7 +6,7 @@
  * underlying NoiseSecretStream.
  */
 
-import type { EarnEvent } from "../../shared/events.ts";
+import type { EarnEvent, SpendCheckpointEvent, EarnCheckpointEvent } from "../../shared/events.ts";
 import { MAX_BLOB_SIZE, MAX_BLOB_SIZE_B64, MAX_CHUNK_B64, MAX_PROMPT_SIZE } from "../../shared/protocol.ts";
 
 const ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -60,15 +60,56 @@ export function isValidMessage(raw: any): boolean {
     // megabyte-sized log messages.
     if (typeof raw.line !== "string" || raw.line.length > 16_384) return false;
   }
+  if (raw.type === "task:claim") {
+    if (raw.acceptor_ledger_key !== undefined && typeof raw.acceptor_ledger_key !== "string") return false;
+  }
   if (raw.type === "task:settle") {
     // The TypeScript discriminated union is compile-time only; without
     // a runtime check a peer can send `action: "<arbitrary>"` and the
     // receiver's settleAction promise resolves to a junk value that
     // bypasses both the approve and reject branches. Lock it down.
     if (raw.action !== "approve" && raw.action !== "reject") return false;
+    // Validate optional checkpoint fields so a hostile peer cannot ship a
+    // deeply-nested JSON object that causes OOM in canonicalStringify/verifyEd25519.
+    if (raw.requester_checkpoint_cosig !== undefined &&
+        typeof raw.requester_checkpoint_cosig !== "string") return false;
+    if (raw.acceptor_earn_checkpoint !== undefined &&
+        !isValidEarnCheckpointShape(raw.acceptor_earn_checkpoint)) return false;
+  }
+  if (raw.type === "spend:cosign") {
+    // Validate spend checkpoint shape before it reaches verifyEd25519 / canonicalStringify.
+    if (!isValidSpendCheckpointShape(raw.spend_checkpoint)) return false;
+  }
+  if (raw.type === "earn:cosign") {
+    if (typeof raw.acceptor_checkpoint_cosig !== "string" ||
+        raw.acceptor_checkpoint_cosig.length === 0) return false;
+    if (!isValidEarnCheckpointShape(raw.acceptor_earn_checkpoint)) return false;
   }
 
   return true;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isValidCheckpointBase(c: any): boolean {
+  if (!c || typeof c !== "object") return false;
+  if (typeof c.balance !== "number" || !Number.isInteger(c.balance)) return false;
+  if (typeof c.amount !== "number" || !Number.isInteger(c.amount) || c.amount < 0) return false;
+  if (typeof c.nonce !== "number" || !Number.isInteger(c.nonce) || c.nonce < 0) return false;
+  if (typeof c.signature !== "string" || c.signature.length === 0) return false;
+  if (typeof c.owner_pubkey !== "string" || c.owner_pubkey.length === 0) return false;
+  if (typeof c.counterparty_pubkey !== "string" || c.counterparty_pubkey.length === 0) return false;
+  if (typeof c.task_id !== "string" || !isValidId(c.task_id)) return false;
+  return true;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isValidSpendCheckpointShape(c: any): boolean {
+  return isValidCheckpointBase(c) && c.type === "spend_checkpoint";
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isValidEarnCheckpointShape(c: any): boolean {
+  return isValidCheckpointBase(c) && c.type === "earn_checkpoint";
 }
 
 /**
@@ -136,7 +177,7 @@ export type P2PMessage =
       /** Hex key of the requester's event Hypercore — used by acceptors to verify balance. */
       requester_ledger_key?: string;
       /** Credit cost the requester expects to pay — acceptors reject if it differs from their policy. */
-      credit_cost: number;
+      credit_cost?: number;
     }
   | {
       type: "task:price_mismatch";
@@ -152,6 +193,7 @@ export type P2PMessage =
       acceptor_pubkey: string;
       rsa_public_key: string;
       next_nonce: number;
+      acceptor_ledger_key?: string;
     }
   | {
       type: "task:match";
@@ -184,6 +226,9 @@ export type P2PMessage =
       type: "task:settle";
       task_id: string;
       action: "approve" | "reject";
+      // On approve: acceptor's cosig for requester's SpendCheckpoint + acceptor's own EarnCheckpoint proposal
+      requester_checkpoint_cosig?: string;
+      acceptor_earn_checkpoint?: EarnCheckpointEvent;
     }
   | {
       type: "task:cancel";
@@ -198,12 +243,15 @@ export type P2PMessage =
   | {
       type: "spend:cosign";
       task_id: string;
-      spend_event: import("../../shared/events.ts").SpendEvent;
+      spend_checkpoint: SpendCheckpointEvent;
     }
   | {
       type: "earn:cosign";
       task_id: string;
-      earn_event: EarnEvent;
+      // acceptor_checkpoint_cosig: acceptor's sig_counterparty for the requester's SpendCheckpoint
+      // is sent back via task:settle. This message carries requester's cosig for acceptor's EarnCheckpoint.
+      acceptor_checkpoint_cosig: string;
+      acceptor_earn_checkpoint: EarnCheckpointEvent;
     }
   | {
       // Broadcast when a peer completes a GitHub mining action.

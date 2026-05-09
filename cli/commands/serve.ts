@@ -38,7 +38,7 @@ import { CLIENT_VERSION } from "../../shared/protocol.ts";
 import { AshSwarm, type SwarmPeer } from "../../core/p2p/swarm.ts";
 import type { P2PMessage } from "../../core/p2p/messages.ts";
 import {
-  appendLocalEvent,
+  appendCheckpointEvent,
   closeLocalStore,
   getLedgerCoreKey,
   getLocalBalance,
@@ -46,13 +46,13 @@ import {
   getRemotePeerBalance,
 } from "../p2p_state.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
-import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
+import { getPeerLedgerKey, registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
 import { LEDGER_TOPIC, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
 import { signEd25519, verifyEd25519, rawHexToPublicKey } from "../../core/crypto/ed25519.ts";
 // signEd25519 is used in the cosigner-side mine:claim handler (~line 506);
 // kept here so the cosign signing path doesn't have to re-import it.
 import { canonicalStringify } from "../../shared/canonical.ts";
-import { eventWithoutSignature } from "../../shared/events.ts";
+import { checkpointPayload } from "../../shared/events.ts";
 import { fetchPR, fetchPRReviews, fetchIssue, ASH_REPO } from "../../core/github/client.ts";
 import { getRuntime } from "../../core/sandbox/runtime.ts";
 
@@ -111,8 +111,8 @@ export interface ActiveTask {
   peer: SwarmPeer;
   resolveBlob?: () => void;
   resolveMatch?: () => void;
-  resolveSpend?: (evt: import("../../shared/events.ts").SpendEvent | null) => void;
-  resolveEarn?: (evt: import("../../shared/events.ts").EarnEvent) => void;
+  resolveSpend?: (evt: import("../../shared/events.ts").SpendCheckpointEvent | null) => void;
+  resolveEarn?: (evt: { acceptor_checkpoint_cosig: string; acceptor_earn_checkpoint: import("../../shared/events.ts").EarnCheckpointEvent } | null) => void;
 }
 
 export async function processTask(
@@ -256,10 +256,10 @@ export async function processTask(
     logger(`  ${YL}⚠${R}  No changes.\n`);
   }
 
-  // Wait for the requester's spend:cosign, then validate and drive the settle.
-  const spendPromise = new Promise<import("../../shared/events.ts").SpendEvent | null>((resolve) => {
+  // Wait for the requester's spend:cosign (SpendCheckpointEvent), then validate and drive the settle.
+  const spendPromise = new Promise<import("../../shared/events.ts").SpendCheckpointEvent | null>((resolve) => {
     let done = false;
-    const settle = (evt: import("../../shared/events.ts").SpendEvent | null) => {
+    const settle = (evt: import("../../shared/events.ts").SpendCheckpointEvent | null) => {
       if (done) return;
       done = true;
       clearTimeout(t);
@@ -275,15 +275,46 @@ export async function processTask(
   const fullCredits = MODEL_CREDITS[modelTier] ?? 0;
   const halfCredits = Math.floor(fullCredits / 2);
   const validAmount = (n: number) => n === fullCredits || n === halfCredits;
-  const spendOk = !authHit && spend !== null &&
-    spend.task_id === active.taskId &&
-    validAmount(spend.amount) &&
-    spend.counterparty_pubkey === myPub &&
-    verifyEd25519(
-      canonicalStringify(eventWithoutSignature(spend)),
-      spend.signature,
-      rawHexToPublicKey(active.requesterPubkey),
-    );
+
+  // Verify the requester's signature over the checkpoint payload (excludes
+  // both `signature` and `sig_counterparty` so the payload is order-invariant).
+  let prevRequesterBalance = 0;
+  let prevRequesterCoreLength = -1;
+  let balanceLookupOk = false;
+  let spendOk = false;
+  if (!authHit && spend !== null) {
+    try {
+      const requesterCoreKey = await getPeerLedgerKey(active.requesterPubkey);
+      if (!requesterCoreKey) throw new Error("no-key");
+      const info = await getRemotePeerBalance(requesterCoreKey, active.requesterPubkey);
+      prevRequesterBalance = info.balance;
+      prevRequesterCoreLength = info.coreLength;
+      balanceLookupOk = true;
+    } catch { /* balance check failure → balanceLookupOk stays false, spendOk stays false */ }
+    spendOk =
+      balanceLookupOk &&
+      spend.balance >= 0 &&
+      spend.task_id === active.taskId &&
+      validAmount(spend.amount) &&
+      spend.counterparty_pubkey === myPub &&
+      spend.owner_pubkey === active.requesterPubkey &&
+      // Strict equality: nonce must match core.length exactly at replication time.
+      // Replication lag is a liveness concern (retry), not a security tolerance.
+      // Using >= would let a requester pre-sign a future nonce and replay it later.
+      //
+      // NOTE (not a bug): coreLength cannot be N+1 when spend.nonce=N in normal usage.
+      // The proposed spend_checkpoint has NOT been appended yet when spend:cosign is sent —
+      // the requester appends only after receiving our approve. The per-pubkey mutex prevents
+      // concurrent appends in the same process; cross-process writes are covered by the
+      // corestore lock. So prevRequesterCoreLength === spend.nonce in the honest path.
+      spend.nonce === prevRequesterCoreLength &&
+      (prevRequesterBalance - spend.amount) === spend.balance &&
+      verifyEd25519(
+        canonicalStringify(checkpointPayload(spend)),
+        spend.signature,
+        rawHexToPublicKey(active.requesterPubkey),
+      );
+  }
 
   if (!spendOk) {
     if (!authHit) {
@@ -303,56 +334,81 @@ export async function processTask(
     return { earned };
   }
 
-  active.peer.send({ type: "task:settle", task_id: active.taskId, action: "approve" });
-  logger(`  ${D}settle: approve${R}\n`);
+  // Cosign the requester's SpendCheckpoint.
+  const { priv: edPriv } = await loadIdentity();
+  const requesterCosig = signEd25519(canonicalStringify(checkpointPayload(spend!)), edPriv);
 
-  const earnPromise = new Promise<import("../../shared/events.ts").EarnEvent | null>((resolve) => {
-    let done = false;
-    const settle = (evt: import("../../shared/events.ts").EarnEvent | null) => {
-      if (done) return;
-      done = true;
-      clearTimeout(t);
-      resolve(evt);
-    };
-    active.resolveEarn = settle;
-    const t = setTimeout(() => settle(null), 30_000);
-  });
-
-  const earn = await earnPromise;
+  // Build, send, and append our EarnCheckpoint inside the per-pubkey mutex so that
+  // balance + nonce are read atomically with the append. Holding the lock across the
+  // network wait serialises earn settlements for this acceptor — the correct behaviour
+  // when two tasks complete concurrently (prevents both from stamping the same balance).
   const expectedEarn = splitFee(spend!.amount).acceptor;
-  if (earn) {
-    try {
-      const earnOk =
-        earn.task_id === active.taskId &&
-        earn.amount === expectedEarn &&
-        earn.counterparty_pubkey === active.requesterPubkey &&
-        verifyEd25519(
-          canonicalStringify(eventWithoutSignature(earn)),
-          earn.signature,
-          rawHexToPublicKey(earn.counterparty_pubkey),
-        );
-      if (!earnOk) {
-        logger(`  ${YL}⚠${R}  earn:cosign invalid — skipping\n`);
-      } else {
-        await appendLocalEvent(myPub, earn);
-        earned = earn.amount;
-        logger(`  ${GR}✓${R}  earn cosigned · +${earn.amount}cr\n`);
-      }
-    } catch (err) {
-      logger(`  ${YL}⚠${R}  failed to append earn: ${(err as Error).message}\n`);
+  await appendCheckpointEvent(myPub, async (earnNonce, myCurrentBalance) => {
+    const earnCheckpointBase: Omit<import("../../shared/events.ts").EarnCheckpointEvent, "signature"> = {
+      type: "earn_checkpoint",
+      nonce: earnNonce,
+      timestamp: new Date().toISOString(),
+      balance: myCurrentBalance + expectedEarn,
+      task_id: active.taskId,
+      amount: expectedEarn,
+      counterparty_pubkey: active.requesterPubkey,
+      owner_pubkey: myPub,
+      sig_counterparty: "",
+    };
+    const earnCheckpointSig = signEd25519(
+      canonicalStringify(checkpointPayload(earnCheckpointBase as import("../../shared/events.ts").EarnCheckpointEvent)),
+      edPriv,
+    );
+    const earnCheckpoint: import("../../shared/events.ts").EarnCheckpointEvent = {
+      ...earnCheckpointBase,
+      signature: earnCheckpointSig,
+    };
+
+    active.peer.send({
+      type: "task:settle",
+      task_id: active.taskId,
+      action: "approve",
+      requester_checkpoint_cosig: requesterCosig,
+      acceptor_earn_checkpoint: earnCheckpoint,
+    });
+    logger(`  ${D}settle: approve${R}\n`);
+
+    const earnMsg = await new Promise<{ acceptor_checkpoint_cosig: string; acceptor_earn_checkpoint: import("../../shared/events.ts").EarnCheckpointEvent } | null>((resolve) => {
+      let done = false;
+      const settle = (evt: { acceptor_checkpoint_cosig: string; acceptor_earn_checkpoint: import("../../shared/events.ts").EarnCheckpointEvent } | null) => {
+        if (done) return;
+        done = true;
+        clearTimeout(t);
+        resolve(evt);
+      };
+      active.resolveEarn = settle;
+      const t = setTimeout(() => settle(null), 30_000);
+    });
+
+    if (!earnMsg) throw new Error("no-earn-cosign");
+
+    const earnCosigOk = verifyEd25519(
+      canonicalStringify(checkpointPayload(earnCheckpoint)),
+      earnMsg.acceptor_checkpoint_cosig,
+      rawHexToPublicKey(active.requesterPubkey),
+    );
+    if (!earnCosigOk) throw new Error("earn-cosig-invalid");
+
+    // earned and success log set only after appendEvent below succeeds (torn-append fix).
+    return { ...earnCheckpoint, sig_counterparty: earnMsg.acceptor_checkpoint_cosig };
+  }).then(() => {
+    earned = expectedEarn;
+    logger(`  ${GR}✓${R}  earn cosigned · +${expectedEarn}cr\n`);
+  }).catch((err: unknown) => {
+    const msg = (err as Error).message;
+    if (msg === "no-earn-cosign") {
+      logger(`  ${YL}⚠${R}  no earn cosign in 30s — credit not awarded (requester dropped after approve)\n`);
+    } else if (msg === "earn-cosig-invalid") {
+      logger(`  ${YL}⚠${R}  earn:cosign invalid — skipping\n`);
+    } else {
+      logger(`  ${YL}⚠${R}  failed to append earn: ${msg}\n`);
     }
-  } else {
-    // earn-cosign DoS — requester sent settle=approve, signed and
-    // forwarded a valid SpendEvent, then dropped before sending the
-    // matching `earn:cosign`. We have no way to materialize a valid
-    // EarnEvent here: replay validates `earn.signature` against the
-    // counterparty (requester) pubkey, which we cannot impersonate.
-    // Self-signing with our own key produces an event that fails
-    // replay forever — silent credit loss. Better to surface the loss
-    // and warn the user. v0.2 will add a `self_signed_via_spend_xref`
-    // schema flag so the cross-ref alone can authorize the earn.
-    logger(`  ${YL}⚠${R}  no earn cosign in 30s — credit not awarded (requester dropped after approve)\n`);
-  }
+  });
 
   await cleanupTask(active.taskId);
   return { earned };
@@ -545,11 +601,11 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
         }
         case "spend:cosign":
           if (msg.task_id !== active.taskId) return;
-          active.resolveSpend?.(msg.spend_event);
+          active.resolveSpend?.(msg.spend_checkpoint);
           return;
         case "earn:cosign":
           if (msg.task_id !== active.taskId) return;
-          active.resolveEarn?.(msg.earn_event);
+          active.resolveEarn?.({ acceptor_checkpoint_cosig: msg.acceptor_checkpoint_cosig, acceptor_earn_checkpoint: msg.acceptor_earn_checkpoint });
           return;
         case "task:cancel":
           if (msg.task_id !== active.taskId) return;
@@ -662,9 +718,9 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
     // replay time will look this up to open the requester's real core.
     await registerPeerLedgerKey(msg.requester_pubkey, msg.requester_ledger_key).catch(() => undefined);
     try {
-      const requesterBalance = await getRemotePeerBalance(msg.requester_ledger_key, msg.requester_pubkey);
-      if (requesterBalance <= 0) {
-        out(`  ${D}skip: ${msg.requester_pubkey.slice(0, 8)} has no credits (${requesterBalance})${R}\n`);
+      const { balance: requesterBalance } = await getRemotePeerBalance(msg.requester_ledger_key, msg.requester_pubkey);
+      if (requesterBalance < expectedCost) {
+        out(`  ${D}skip: ${msg.requester_pubkey.slice(0, 8)} has insufficient credits (${requesterBalance} < ${expectedCost})${R}\n`);
         return;
       }
     } catch (err) {
@@ -686,12 +742,14 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
       busy = false;
       return;
     }
+    const myLedgerKey = await getLedgerCoreKey(myPub).catch(() => undefined);
     const claim: P2PMessage = {
       type: "task:claim",
       task_id: msg.task_id,
       acceptor_pubkey: myPub,
       rsa_public_key: rsaPubPem,
       next_nonce: myNextNonce,
+      acceptor_ledger_key: myLedgerKey,
     };
     peer.send(claim);
 

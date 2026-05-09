@@ -140,7 +140,7 @@ export const peersCommand = new Command("peers")
         let balStr = "  ?  ";
         if (info.ledgerKey) {
           try {
-            const bal = await getRemotePeerBalance(info.ledgerKey, pubkey);
+            const { balance: bal } = await getRemotePeerBalance(info.ledgerKey, pubkey);
             balStr = `${String(bal).padStart(4)} cr`;
           } catch { /* ignore */ }
         }
