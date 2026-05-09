@@ -405,7 +405,7 @@ async function replayAdminMints(recipientPubkey: string, recipientCoreKeyHex?: s
  *      and presents it as a legitimate counterparty cosignature.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function getLatestCheckpoint(core: any, ownerPubkeyHex: string): Promise<SpendCheckpointEvent | EarnCheckpointEvent | null> {
+async function getLatestCheckpoint(core: any, ownerPubkeyHex: string, waitForBlocks = false): Promise<SpendCheckpointEvent | EarnCheckpointEvent | null> {
   let ownerPubKey: ReturnType<typeof rawHexToPublicKey> | null = null;
   try {
     ownerPubKey = rawHexToPublicKey(ownerPubkeyHex);
@@ -417,7 +417,12 @@ async function getLatestCheckpoint(core: any, ownerPubkeyHex: string): Promise<S
   let mintCache: Map<string, number> | undefined;
   for (let i = len - 1; i >= 0; i--) {
     try {
-      const raw = await core.get(i, { wait: false }) as string | null;
+      // wait:false silently skips blocks that haven't replicated yet, which
+      // makes us fall back to an older checkpoint and compute a stale balance —
+      // the recurring "earn-invalid" race in pure A↔B settlements traced back
+      // to exactly this. wait:true forces the block to download (caller is
+      // responsible for ensuring the swarm is alive when waitForBlocks=true).
+      const raw = await core.get(i, { wait: waitForBlocks }) as string | null;
       if (raw == null) continue;
       const ev = JSON.parse(raw) as Event;
       if (ev.type !== "spend_checkpoint" && ev.type !== "earn_checkpoint") continue;
@@ -485,7 +490,7 @@ async function getLatestCheckpoint(core: any, ownerPubkeyHex: string): Promise<S
  *  required for cross-side balance determinism. Status-style callers leave it false. */
 export async function getLocalBalance(ownerPubkeyHex: string, waitForBlocks = false): Promise<number> {
   const core = await getUserCore(ownerPubkeyHex);
-  const checkpoint = await getLatestCheckpoint(core, ownerPubkeyHex);
+  const checkpoint = await getLatestCheckpoint(core, ownerPubkeyHex, waitForBlocks);
   if (checkpoint !== null) {
     return replayBalance(core, ownerPubkeyHex, checkpoint.balance, checkpoint.nonce + 1, undefined, waitForBlocks);
   }
@@ -550,6 +555,26 @@ export async function getRemoteBalance(
 
   // Capture length after replication so callers can validate incoming nonces.
   const coreLength: number = core.length ?? 0;
+
+  // Pre-fetch the full block range so getLatestCheckpoint / replayBalance below
+  // see the latest checkpoint instead of falling back to an older one when the
+  // most recent block hasn't replicated yet. Mirrors the cross-ref download
+  // pattern. This is the fix for the intermittent "earn-invalid" we hit on the
+  // settle path: previously `getLatestCheckpoint` did `core.get(i, {wait:false})`,
+  // silently skipped a not-yet-replicated tip block, and used a stale balance.
+  if (coreLength > 0) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dl = (core as any).download?.({ start: 0, end: coreLength });
+      if (dl) {
+        await Promise.race([
+          dl.done?.() ?? Promise.resolve(),
+          new Promise<void>((r) => setTimeout(r, timeoutMs)),
+        ]);
+        dl.destroy?.();
+      }
+    } catch { /* non-fatal — checkpoint scan below will still try wait:true */ }
+  }
 
   // counterpartyMintsOverride decides how `verifyEarnCrossRef` gates each earn:
   //   - array: strict mode — build verified set, only listed pubkeys pass
