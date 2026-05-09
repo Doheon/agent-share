@@ -41,7 +41,8 @@ import { getCorestore } from "../../core/ledger/store.ts";
 import { getEvents, getAdminMintsFor } from "../../core/ledger/events.ts";
 import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
 import { LEDGER_TOPIC, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
-import { resolveTier } from "../../shared/policy.ts";
+import { resolveTier, decideDiffOutcome } from "../../shared/policy.ts";
+import { formatLedgerEvent } from "../../shared/event_format.ts";
 import { AshSwarm, type SwarmPeer } from "../../core/p2p/swarm.ts";
 import type { P2PMessage } from "../../core/p2p/messages.ts";
 import { sanitizeLogLine } from "../../core/p2p/messages.ts";
@@ -792,8 +793,6 @@ function ChatApp({
 
       pendingRef.current!.onDiff = async (patch) => {
         const p = pendingRef.current!;
-        const fullCost = cost;
-        const halfCost = Math.floor(cost / 2);
         const hasPatch = !!patch && patch.trim() !== "";
 
         // Render accumulated agent output as markdown before showing diff info.
@@ -807,18 +806,7 @@ function ChatApp({
           }
         }
 
-        // Decide outcome: full charge on apply; half on reject / empty-diff /
-        // no-response. Acceptor still did the work, so a partial charge keeps
-        // the economics honest.
-        let amount: number;
-        let applyRequested = false;
-        let outcomeLabel: string;
-
-        if (!hasPatch) {
-          amount = halfCost;
-          outcomeLabel = "no changes";
-          addMsg(`  ⎿ no diff · auto half-charge (${halfCost}cr)`, "#e3bd5a");
-        } else {
+        if (hasPatch) {
           const files = getChangedFiles(patch);
           const insertions = (patch.match(/^\+[^+]/gm) ?? []).length;
           const deletions  = (patch.match(/^-[^-]/gm) ?? []).length;
@@ -828,9 +816,18 @@ function ChatApp({
           // (terminal-title spoof, OSC 52 clipboard write, etc.).
           // The wire-side `sanitizeLogLine` strips C0 / CSI / OSC.
           for (const f of files) addMsg(`  ⎿ • ${sanitizeLogLine(f)}`, "#6b6b6b");
-          amount = fullCost;
-          applyRequested = true;
-          outcomeLabel = "applied";
+        }
+
+        // Centralised charge policy lives in shared/policy.ts. The TUI
+        // auto-approves any non-empty diff, so `approved` mirrors `hasPatch`
+        // here — the CLI's reject branch maps to the same helper.
+        const { amount, applyRequested, label: outcomeLabel } = decideDiffOutcome({
+          fullCost: cost,
+          hasPatch,
+          approved: hasPatch,
+        });
+        if (!hasPatch) {
+          addMsg(`  ⎿ no diff · auto half-charge (${amount}cr)`, "#e3bd5a");
         }
 
         // Drive the bilateral cosign protocol. settleAsRequester signs+sends our
@@ -1126,19 +1123,10 @@ function ChatApp({
           addMsg("no events", "#888888");
           break;
         }
+        const kindColor: Record<string, string> = { earn: "#7cd38a", spend: "#e3bd5a", mint: "#88ccff" };
         for (const evt of all) {
-          const ts = evt.timestamp.slice(0, 19).replace("T", " ");
-          if (evt.type === "earn") {
-            addMsg(`  ${ts}  earn   +${String(evt.amount).padStart(4)} cr  from ${evt.counterparty_pubkey.slice(0, 8)}…`, "#7cd38a");
-          } else if (evt.type === "spend") {
-            addMsg(`  ${ts}  spend  -${String(evt.amount).padStart(4)} cr  to   ${evt.counterparty_pubkey.slice(0, 8)}…`, "#e3bd5a");
-          } else if (evt.type === "earn_checkpoint") {
-            addMsg(`  ${ts}  earn   +${String(evt.amount).padStart(4)} cr  from ${evt.counterparty_pubkey.slice(0, 8)}…  (bal: ${evt.balance})`, "#7cd38a");
-          } else if (evt.type === "spend_checkpoint") {
-            addMsg(`  ${ts}  spend  -${String(evt.amount).padStart(4)} cr  to   ${evt.counterparty_pubkey.slice(0, 8)}…  (bal: ${evt.balance})`, "#e3bd5a");
-          } else if (evt.type === "mint") {
-            addMsg(`  ${ts}  mint   +${String(evt.amount).padStart(4)} cr  admin  (${evt.reason})`, "#88ccff");
-          }
+          const f = formatLedgerEvent(evt);
+          if (f) addMsg(`  ${f.ts}  ${f.body}`, kindColor[f.kind]);
         }
         // Same validated balance path as /status, `ash status`, and the
         // requester-credit check in serve — raw event sum can diverge.

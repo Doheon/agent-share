@@ -43,6 +43,7 @@ import { AshSwarm, type SwarmPeer } from "../../core/p2p/swarm.ts";
 import type { P2PMessage } from "../../core/p2p/messages.ts";
 import { sanitizeLogLine } from "../../core/p2p/messages.ts";
 import { DEFAULT_MODEL_TIER } from "../../shared/types.ts";
+import { decideDiffOutcome } from "../../shared/policy.ts";
 import { CHUNK_BYTES } from "../../shared/protocol.ts";
 import { ensureInitialized, NotInitializedError } from "../guard.ts";
 
@@ -299,39 +300,29 @@ export const runCommand = new Command("run")
     });
 
     const handleDiff = async (patch: string) => {
-      const fullCost = cost;
-      const halfCost = Math.floor(cost / 2);
       const hasPatch = !!patch && patch.trim() !== "";
 
-      // Charge half on no-diff or user-reject so the acceptor is compensated for
-      // the work they actually performed (LLM API spend, sandbox time). Mirrors
-      // the chat.tsx policy. Without this, an `ash run` requester gets a free
-      // attempt for every empty-diff outcome.
-      let amount: number;
-      let applyRequested = false;
-      let outcomeLabel: string;
-
-      if (!hasPatch) {
-        amount = halfCost;
-        outcomeLabel = "no changes";
-        console.log(`\n  no diff · auto half-charge (${halfCost}cr)`);
-      } else {
+      let approved = false;
+      if (hasPatch) {
         const files = getChangedFiles(patch);
         const insertions = (patch.match(/^\+[^+]/gm) ?? []).length;
         const deletions  = (patch.match(/^-[^-]/gm) ?? []).length;
         console.log(`\n  ${files.length} file(s) changed  +${insertions} / -${deletions}`);
         for (const f of files) console.log(`    • ${f}`);
+        approved = opts.yes ? true : await confirm({ message: "Apply these changes?" });
+      }
 
-        const shouldApply = opts.yes ? true : await confirm({ message: "Apply these changes?" });
-        if (!shouldApply) {
-          amount = halfCost;
-          outcomeLabel = "rejected";
-          console.log(`  patch discarded · half-charge (${halfCost}cr)`);
-        } else {
-          amount = fullCost;
-          applyRequested = true;
-          outcomeLabel = "applied";
-        }
+      // Centralised half-charge policy lives in shared/policy.ts so this CLI
+      // and the TUI both compute the same amount for the same situation.
+      const { amount, applyRequested, label: outcomeLabel } = decideDiffOutcome({
+        fullCost: cost,
+        hasPatch,
+        approved,
+      });
+      if (!hasPatch) {
+        console.log(`\n  no diff · auto half-charge (${amount}cr)`);
+      } else if (!approved) {
+        console.log(`  patch discarded · half-charge (${amount}cr)`);
       }
 
       // Drive the bilateral cosign protocol. settleAsRequester signs+sends our

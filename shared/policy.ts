@@ -81,3 +81,44 @@ export function splitFee(gross: number): { acceptor: number; treasury: number } 
   const treasury = Math.floor(gross * FEE_BPS / 10_000);
   return { acceptor: gross - treasury, treasury };
 }
+
+/**
+ * Per-task charge policy applied after the acceptor returns a diff.
+ *
+ * - applied:   diff non-empty AND requester approved → full cost
+ * - rejected:  diff non-empty BUT requester declined → half cost
+ *              (acceptor still ran the work, so they are partially paid)
+ * - no-changes: diff empty → half cost
+ *               (same rationale: acceptor consumed API budget for nothing)
+ *
+ * Centralised here so `ash run` and the TUI cannot drift on the half-charge
+ * fraction or the apply gating — they each consult this and only diverge in
+ * their UI-side rendering.
+ */
+export type DiffOutcomeLabel = "applied" | "rejected" | "no changes";
+
+export interface DiffOutcome {
+  amount: number;
+  applyRequested: boolean;
+  label: DiffOutcomeLabel;
+}
+
+export function decideDiffOutcome(args: {
+  fullCost: number;
+  hasPatch: boolean;
+  /** Ignored when hasPatch is false. */
+  approved: boolean;
+}): DiffOutcome {
+  const halfCost = halfCostFor(args.fullCost);
+  if (!args.hasPatch) {
+    return { amount: halfCost, applyRequested: false, label: "no changes" };
+  }
+  if (!args.approved) {
+    return { amount: halfCost, applyRequested: false, label: "rejected" };
+  }
+  return { amount: args.fullCost, applyRequested: true, label: "applied" };
+}
+
+export function halfCostFor(fullCost: number): number {
+  return Math.floor(fullCost / 2);
+}
