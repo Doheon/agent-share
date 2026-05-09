@@ -345,6 +345,7 @@ function ChatApp({
       state.active = {
         taskId: announce.task_id,
         requesterPubkey: announce.requester_pubkey,
+        requesterLedgerKey: announce.requester_ledger_key ?? "",
         prompt: announce.prompt,
         model: announce.model,
         peer,

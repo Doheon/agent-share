@@ -46,7 +46,7 @@ import {
   getRemotePeerBalance,
 } from "../p2p_state.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
-import { getPeerLedgerKey, registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
+import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
 import { LEDGER_TOPIC, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
 import { signEd25519, verifyEd25519, rawHexToPublicKey } from "../../core/crypto/ed25519.ts";
 // signEd25519 is used in the cosigner-side mine:claim handler (~line 506);
@@ -100,6 +100,7 @@ function semverGt(a: string, b: string): boolean {
 export interface ActiveTask {
   taskId: string;
   requesterPubkey: string;
+  requesterLedgerKey: string;
   prompt: string;
   model: string;
   blobSize?: number;
@@ -284,18 +285,11 @@ export async function processTask(
   let spendOk = false;
   if (!authHit && spend !== null) {
     try {
-      const requesterCoreKey = await getPeerLedgerKey(active.requesterPubkey);
-      if (!requesterCoreKey) throw new Error("no-key");
-      const info = await getRemotePeerBalance(requesterCoreKey, active.requesterPubkey);
+      const info = await getRemotePeerBalance(active.requesterLedgerKey, active.requesterPubkey);
       prevRequesterBalance = info.balance;
       prevRequesterCoreLength = info.coreLength;
       balanceLookupOk = true;
     } catch { /* balance check failure → balanceLookupOk stays false, spendOk stays false */ }
-    const sigOk = verifyEd25519(
-      canonicalStringify(checkpointPayload(spend)),
-      spend.signature,
-      rawHexToPublicKey(active.requesterPubkey),
-    );
     spendOk =
       balanceLookupOk &&
       spend.balance >= 0 &&
@@ -303,12 +297,22 @@ export async function processTask(
       validAmount(spend.amount) &&
       spend.counterparty_pubkey === myPub &&
       spend.owner_pubkey === active.requesterPubkey &&
+      // Strict equality: nonce must match core.length exactly at replication time.
+      // Replication lag is a liveness concern (retry), not a security tolerance.
+      // Using >= would let a requester pre-sign a future nonce and replay it later.
+      //
+      // NOTE (not a bug): coreLength cannot be N+1 when spend.nonce=N in normal usage.
+      // The proposed spend_checkpoint has NOT been appended yet when spend:cosign is sent —
+      // the requester appends only after receiving our approve. The per-pubkey mutex prevents
+      // concurrent appends in the same process; cross-process writes are covered by the
+      // corestore lock. So prevRequesterCoreLength === spend.nonce in the honest path.
       spend.nonce === prevRequesterCoreLength &&
       (prevRequesterBalance - spend.amount) === spend.balance &&
-      sigOk;
-    if (!spendOk) {
-      logger(`  ${YL}⚠${R}  spend debug: lookup=${balanceLookupOk} bal>=0=${spend.balance >= 0} taskId=${spend.task_id === active.taskId} amount=${validAmount(spend.amount)}(${spend.amount}) nonce=${spend.nonce}=?=${prevRequesterCoreLength} balMath=${prevRequesterBalance}-${spend.amount}=${prevRequesterBalance - spend.amount}=?=${spend.balance} sig=${sigOk}\n`);
-    }
+      verifyEd25519(
+        canonicalStringify(checkpointPayload(spend)),
+        spend.signature,
+        rawHexToPublicKey(active.requesterPubkey),
+      );
   }
 
   if (!spendOk) {
@@ -748,6 +752,7 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
     active = {
       taskId: msg.task_id,
       requesterPubkey: msg.requester_pubkey,
+      requesterLedgerKey: msg.requester_ledger_key,
       prompt: msg.prompt,
       model: msg.model,
       blobSize: msg.blob_size,
