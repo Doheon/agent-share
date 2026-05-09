@@ -291,6 +291,11 @@ export async function processTask(
       prevRequesterCoreLength = info.coreLength;
       balanceLookupOk = true;
     } catch { /* balance check failure → balanceLookupOk stays false, spendOk stays false */ }
+    const sigOk = verifyEd25519(
+      canonicalStringify(checkpointPayload(spend)),
+      spend.signature,
+      rawHexToPublicKey(active.requesterPubkey),
+    );
     spendOk =
       balanceLookupOk &&
       spend.balance >= 0 &&
@@ -298,29 +303,16 @@ export async function processTask(
       validAmount(spend.amount) &&
       spend.counterparty_pubkey === myPub &&
       spend.owner_pubkey === active.requesterPubkey &&
-      // Strict equality: nonce must match core.length exactly at replication time.
-      // Replication lag is a liveness concern (retry), not a security tolerance.
-      // Using >= would let a requester pre-sign a future nonce and replay it later.
-      //
-      // NOTE (not a bug): coreLength cannot be N+1 when spend.nonce=N in normal usage.
-      // The proposed spend_checkpoint has NOT been appended yet when spend:cosign is sent —
-      // the requester appends only after receiving our approve. The per-pubkey mutex prevents
-      // concurrent appends in the same process; cross-process writes are covered by the
-      // corestore lock. So prevRequesterCoreLength === spend.nonce in the honest path.
       spend.nonce === prevRequesterCoreLength &&
       (prevRequesterBalance - spend.amount) === spend.balance &&
-      verifyEd25519(
-        canonicalStringify(checkpointPayload(spend)),
-        spend.signature,
-        rawHexToPublicKey(active.requesterPubkey),
-      );
+      sigOk;
+    if (!spendOk) {
+      logger(`  ${YL}⚠${R}  spend debug: lookup=${balanceLookupOk} bal>=0=${spend.balance >= 0} taskId=${spend.task_id === active.taskId} amount=${validAmount(spend.amount)}(${spend.amount}) nonce=${spend.nonce}=?=${prevRequesterCoreLength} balMath=${prevRequesterBalance}-${spend.amount}=${prevRequesterBalance - spend.amount}=?=${spend.balance} sig=${sigOk}\n`);
+    }
   }
 
   if (!spendOk) {
     if (!authHit) {
-      // spend === null means the requester cancelled (e.g. empty diff) or
-      // the 120s window elapsed — a legitimate outcome, not a protocol
-      // violation. Only a non-null-but-unverifiable spend is truly invalid.
       if (spend === null) {
         logger(`  ${D}requester declined — no credits charged${R}\n`);
       } else {
