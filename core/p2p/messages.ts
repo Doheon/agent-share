@@ -62,6 +62,8 @@ export function isValidMessage(raw: any): boolean {
   }
   if (raw.type === "task:claim") {
     if (raw.acceptor_ledger_key !== undefined && typeof raw.acceptor_ledger_key !== "string") return false;
+    if (raw.admin_core_key !== undefined && typeof raw.admin_core_key !== "string") return false;
+    if (raw.admin_mints !== undefined && (!Array.isArray(raw.admin_mints) || raw.admin_mints.length > 200)) return false;
   }
   if (raw.type === "task:settle") {
     // The TypeScript discriminated union is compile-time only; without
@@ -194,6 +196,8 @@ export type P2PMessage =
       rsa_public_key: string;
       next_nonce: number;
       acceptor_ledger_key?: string;
+      admin_core_key?: string;
+      admin_mints?: unknown[];
     }
   | {
       type: "task:match";

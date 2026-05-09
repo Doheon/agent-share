@@ -46,8 +46,9 @@ import {
   getRemotePeerBalance,
 } from "../p2p_state.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
+import { getAdminMintsFor } from "../../core/ledger/events.ts";
 import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
-import { LEDGER_TOPIC, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
+import { LEDGER_TOPIC, ADMIN_LEDGER_KEY, ADMIN_PUBKEY } from "../../shared/constants.ts";
 import { signEd25519, verifyEd25519, rawHexToPublicKey } from "../../core/crypto/ed25519.ts";
 // signEd25519 is used in the cosigner-side mine:claim handler (~line 506);
 // kept here so the cosign signing path doesn't have to re-import it.
@@ -713,15 +714,31 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
     // Persist the mapping before verifying balance — verifyEarnCrossRef at
     // replay time will look this up to open the requester's real core.
     await registerPeerLedgerKey(msg.requester_pubkey, msg.requester_ledger_key).catch(() => undefined);
-    try {
-      const { balance: requesterBalance } = await getRemotePeerBalance(msg.requester_ledger_key, msg.requester_pubkey);
-      if (requesterBalance < expectedCost) {
-        out(`  ${D}skip: ${msg.requester_pubkey.slice(0, 8)} has insufficient credits (${requesterBalance} < ${expectedCost})${R}\n`);
-        return;
+    // Retry balance check up to 3 times with 3s spacing to handle DHT replication lag.
+    // On localhost the LEDGER_TOPIC connection may not be established when the first
+    // task:announce arrives, causing core.update() to return 0 blocks prematurely.
+    let requesterBalance = 0;
+    let balanceVerified = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const result = await getRemotePeerBalance(msg.requester_ledger_key, msg.requester_pubkey);
+        requesterBalance = result.balance;
+        if (requesterBalance >= expectedCost) { balanceVerified = true; break; }
+        if (attempt < 2) {
+          out(`  ${D}balance check attempt ${attempt + 1}: ${requesterBalance}cr < ${expectedCost}cr — retrying in 3s…${R}\n`);
+          await sleep(3000);
+        }
+      } catch (err) {
+        if (attempt === 2) {
+          console.error(`[warn] Could not verify requester balance: ${err}. Rejecting task.`);
+          return;
+        }
+        await sleep(3000);
       }
-    } catch (err) {
-      console.error(`[warn] Could not verify requester balance: ${err}. Rejecting task.`);
-      return; // Fail closed: reject if we can't verify
+    }
+    if (!balanceVerified) {
+      out(`  ${D}skip: ${msg.requester_pubkey.slice(0, 8)} has insufficient credits (${requesterBalance} < ${expectedCost})${R}\n`);
+      return;
     }
 
     busy = true;
@@ -739,6 +756,12 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
       return;
     }
     const myLedgerKey = await getLedgerCoreKey(myPub).catch(() => undefined);
+    const myAdminCoreKey = ADMIN_PUBKEY
+      ? await getLedgerCoreKey(ADMIN_PUBKEY).catch(() => undefined)
+      : undefined;
+    const myAdminMints = ADMIN_PUBKEY
+      ? await getAdminMintsFor(myPub).catch(() => [])
+      : [];
     const claim: P2PMessage = {
       type: "task:claim",
       task_id: msg.task_id,
@@ -746,6 +769,8 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
       rsa_public_key: rsaPubPem,
       next_nonce: myNextNonce,
       acceptor_ledger_key: myLedgerKey,
+      ...(myAdminCoreKey ? { admin_core_key: myAdminCoreKey } : {}),
+      ...(myAdminMints.length > 0 ? { admin_mints: myAdminMints } : {}),
     };
     peer.send(claim);
 

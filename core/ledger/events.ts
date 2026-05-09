@@ -289,13 +289,14 @@ async function verifyEarnCrossRef(
  * targeting the given recipient pubkey.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function openAdminCore(): Promise<any | null> {
+async function openAdminCore(adminCoreKeyOverride?: string): Promise<any | null> {
   if (!ADMIN_PUBKEY) return null;
-  if (ADMIN_LEDGER_KEY) {
+  const key = adminCoreKeyOverride || ADMIN_LEDGER_KEY;
+  if (key) {
     // Open by actual Hypercore key for cross-machine replication.
     const store = await getCorestore();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const core: any = store.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
+    const core: any = store.get(Buffer.from(key, "hex"), { valueEncoding: "utf-8" });
     await core.ready();
     return core;
   }
@@ -303,10 +304,10 @@ async function openAdminCore(): Promise<any | null> {
   return getUserCore(ADMIN_PUBKEY);
 }
 
-async function replayAdminMints(recipientPubkey: string, recipientCoreKeyHex?: string): Promise<number> {
+async function replayAdminMints(recipientPubkey: string, recipientCoreKeyHex?: string, adminCoreKeyOverride?: string): Promise<number> {
   if (!ADMIN_PUBKEY) return 0;
   try {
-    const adminCore = await openAdminCore();
+    const adminCore = await openAdminCore(adminCoreKeyOverride);
     if (!adminCore) return 0;
     // Pull latest blocks from any connected peer. Allow up to 8 s on cold
     // starts (DHT connection + first replication round-trip); cached after.
@@ -481,10 +482,12 @@ export async function getRemoteBalance(
   coreKeyHex: string,
   recipientPubkey: string,
   timeoutMs = 8000,
+  adminCoreKeyOverride?: string,
+  adminMintsOverride?: unknown[],
 ): Promise<{ balance: number; coreLength: number }> {
   const store = await getCorestore();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const core: any = store.get(
+  let core: any = store.get(
     Buffer.from(coreKeyHex, "hex"),
     { valueEncoding: "utf-8" },
   );
@@ -493,7 +496,7 @@ export async function getRemoteBalance(
   const updates: Promise<void>[] = [core.update().catch(() => undefined)];
   if (ADMIN_PUBKEY) {
     updates.push(
-      openAdminCore()
+      openAdminCore(adminCoreKeyOverride)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .then((ac: any) => ac?.update())
         .catch(() => {}),
@@ -504,6 +507,19 @@ export async function getRemoteBalance(
     Promise.all(updates),
     new Promise<void>((r) => setTimeout(r, timeoutMs)),
   ]);
+
+  // Fallback: if the key-based open returned no blocks (peer not yet
+  // connected on LEDGER_TOPIC), try the locally-registered name-based core
+  // for this pubkey. This handles offline tests and cold-start races where
+  // the remote peer's corestore is accessible via a pre-seeded local copy.
+  if ((core.length ?? 0) === 0) {
+    try {
+      const localCore = await getUserCore(recipientPubkey);
+      if ((localCore.length ?? 0) > 0) {
+        core = localCore;
+      }
+    } catch { /* ignore — stick with the key-based core */ }
+  }
 
   // Capture length after replication so callers can validate incoming nonces.
   const coreLength: number = core.length ?? 0;
@@ -520,7 +536,12 @@ export async function getRemoteBalance(
     return { balance, coreLength };
   }
   // Fallback: full replay for pre-checkpoint cores or peers that never transacted.
-  const mints = await replayAdminMints(recipientPubkey, coreKeyHex);
+  // When the caller provides pre-fetched mint events (cross-machine case where the
+  // admin core cannot be replicated), verify their signatures locally instead of
+  // reading the local admin core (which would be empty on a remote requester machine).
+  const mints = adminMintsOverride !== undefined
+    ? sumVerifiedAdminMints(adminMintsOverride, recipientPubkey, coreKeyHex)
+    : await replayAdminMints(recipientPubkey, coreKeyHex, adminCoreKeyOverride);
   return { balance: await replayBalance(core, recipientPubkey, mints), coreLength };
 }
 
@@ -535,6 +556,52 @@ export async function getEvents(ownerPubkeyHex: string): Promise<Event[]> {
     } catch { /* skip malformed */ }
   }
   return events;
+}
+
+/**
+ * Verifies and sums a list of admin mint events provided by a remote peer.
+ * All signature and binding checks mirror replayAdminMints so the two paths
+ * produce identical results — use this when the admin core cannot be replicated
+ * cross-machine (i.e. ADMIN_LEDGER_KEY is unset and the peer runs a different
+ * corestore).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function sumVerifiedAdminMints(mints: unknown[], recipientPubkey: string, recipientCoreKeyHex?: string): number {
+  if (!ADMIN_PUBKEY) return 0;
+  let adminPubKey: ReturnType<typeof rawHexToPublicKey>;
+  try {
+    adminPubKey = rawHexToPublicKey(ADMIN_PUBKEY);
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  let signupCounted = false;
+  for (const mintRaw of mints) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const event = mintRaw as any;
+      if (
+        event.type !== "mint" ||
+        event.recipient_pubkey !== recipientPubkey ||
+        event.signer_pubkey !== ADMIN_PUBKEY
+      ) continue;
+      if (typeof event.signature !== "string" || event.signature.length === 0) continue;
+      if (typeof event.amount !== "number" || !Number.isFinite(event.amount) || event.amount <= 0) continue;
+      const valid = verifyEd25519(
+        canonicalStringify(eventWithoutSignature(event)),
+        event.signature,
+        adminPubKey,
+      );
+      if (!valid) continue;
+      if (event.recipient_core_key && recipientCoreKeyHex && event.recipient_core_key !== recipientCoreKeyHex) continue;
+      if (event.reason === "signup") {
+        if (signupCounted) continue;
+        signupCounted = true;
+      }
+      total += event.amount;
+    } catch { /* skip malformed */ }
+  }
+  return total;
 }
 
 /** Returns all valid MintEvents from the admin core targeting the given recipient. */

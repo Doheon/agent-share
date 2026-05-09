@@ -53,7 +53,8 @@ export const runCommand = new Command("run")
   .description("Send a one-shot prompt to the P2P network and apply the result")
   .argument("<prompt>", "Task prompt to send")
   .option("--model <tier>", "Model tier override")
-  .action(async (prompt: string, opts: { model?: string }) => {
+  .option("--yes", "Auto-approve diff without interactive prompt (for QA testing)")
+  .action(async (prompt: string, opts: { model?: string; yes?: boolean }) => {
     try {
       await ensureInitialized();
     } catch (err) {
@@ -133,14 +134,28 @@ export const runCommand = new Command("run")
       const { default: Hyperswarm } = (await import("hyperswarm")) as any;
       repSwarm = new Hyperswarm();
       const store = await getCorestore();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let adminCore: any = null;
       if (ADMIN_LEDGER_KEY) {
-        const ac = store.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
-        await ac.ready().catch(() => {});
+        adminCore = store.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
+        await adminCore.ready().catch(() => {});
       }
       repSwarm.join(LEDGER_TOPIC);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       repSwarm.on("connection", (conn: any) => store.replicate(conn));
       await Promise.race([repSwarm.flush(), new Promise<void>((r) => setTimeout(r, 5000))]);
+      // Sync admin core after LEDGER_TOPIC peers connect so replayAdminMints
+      // sees the correct mints when we snapshot acceptor balance at task:claim.
+      if (adminCore) {
+        await Promise.race([adminCore.update().catch(() => {}), new Promise<void>((r) => setTimeout(r, 5000))]);
+        if ((adminCore.length ?? 0) > 0) {
+          try {
+            const dl = adminCore.download({ start: 0, end: adminCore.length });
+            await Promise.race([dl.done(), new Promise<void>((r) => setTimeout(r, 5000))]);
+            dl.destroy?.();
+          } catch { /* non-fatal */ }
+        }
+      }
     } catch {
       // Non-fatal — balance propagation will be delayed but tasks still work.
     }
@@ -219,7 +234,18 @@ export const runCommand = new Command("run")
           // validate the earn checkpoint at settlement without re-replicating.
           // If the core is unreachable or mismatches next_nonce, cancel now.
           if (acceptorLedgerKey) {
-            const snap = await getRemoteBalance(acceptorLedgerKey, acceptorPubkey, 5000).catch(() => null);
+            // admin_mints carries the acceptor's admin-signed credit grants. We
+            // verify their signatures locally so we don't need to replicate the
+            // admin Hypercore cross-machine (which is unreliable without a fixed
+            // ADMIN_LEDGER_KEY). This is the primary path; admin_core_key is a
+            // secondary hint used when ADMIN_LEDGER_KEY is configured.
+            const snap = await getRemoteBalance(
+              acceptorLedgerKey,
+              acceptorPubkey,
+              5000,
+              msg.admin_core_key,
+              msg.admin_mints,
+            ).catch(() => null);
             if (!snap || snap.coreLength !== msg.next_nonce) {
               console.error("  acceptor core unreachable or nonce mismatch — task cancelled");
               peer.send({ type: "task:cancel", task_id: taskId });
@@ -293,7 +319,7 @@ export const runCommand = new Command("run")
       console.log(`\n  ${files.length} file(s) changed  +${insertions} / -${deletions}`);
       for (const f of files) console.log(`    • ${f}`);
 
-      const shouldApply = await confirm({ message: "Apply these changes?" });
+      const shouldApply = opts.yes ? true : await confirm({ message: "Apply these changes?" });
       if (!shouldApply) {
         acceptorPeer?.send({ type: "task:cancel", task_id: taskId });
         console.log("  rejected · patch discarded");
