@@ -64,6 +64,8 @@ export function isValidMessage(raw: any): boolean {
     if (raw.acceptor_ledger_key !== undefined && typeof raw.acceptor_ledger_key !== "string") return false;
     if (raw.admin_core_key !== undefined && typeof raw.admin_core_key !== "string") return false;
     if (raw.admin_mints !== undefined && (!Array.isArray(raw.admin_mints) || raw.admin_mints.length > 200)) return false;
+    if (raw.counterparty_admin_mints !== undefined && (!Array.isArray(raw.counterparty_admin_mints) || raw.counterparty_admin_mints.length > 1000)) return false;
+    if (raw.counterparty_ledger_keys !== undefined && (typeof raw.counterparty_ledger_keys !== "object" || Array.isArray(raw.counterparty_ledger_keys))) return false;
   }
   if (raw.type === "task:settle") {
     // The TypeScript discriminated union is compile-time only; without
@@ -198,6 +200,8 @@ export type P2PMessage =
       acceptor_ledger_key?: string;
       admin_core_key?: string;
       admin_mints?: unknown[];
+      counterparty_admin_mints?: unknown[];
+      counterparty_ledger_keys?: Record<string, string>;
     }
   | {
       type: "task:match";

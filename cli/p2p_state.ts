@@ -118,7 +118,10 @@ export async function appendCheckpointEvent(
     .catch(() => undefined)
     .then(async () => {
       const nonce = await getEventCount(pubkey);
-      const balance = await _getLocalBalance(pubkey);
+      // waitForBlocks=true: checkpoint settlement runs in an active swarm so we
+      // can pull missing counterparty blocks on demand. This makes cross-ref
+      // deterministic and the resulting balance match what the requester computes.
+      const balance = await _getLocalBalance(pubkey, true);
       const event = await build(nonce, balance);
       await appendEvent(pubkey, event);
     });

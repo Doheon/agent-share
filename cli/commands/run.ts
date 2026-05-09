@@ -239,12 +239,24 @@ export const runCommand = new Command("run")
             // admin Hypercore cross-machine (which is unreliable without a fixed
             // ADMIN_LEDGER_KEY). This is the primary path; admin_core_key is a
             // secondary hint used when ADMIN_LEDGER_KEY is configured.
+            // Always pass arrays (not undefined) for both admin_mints and
+            // counterparty_admin_mints. When the acceptor omits these fields,
+            // undefined would fall through to `replayAdminMints` against our
+            // LOCAL admin core, which can diverge from the acceptor's view.
+            // Empty arrays force the verified-set path with 0 mints / empty set,
+            // matching the acceptor's computation byte-for-byte.
+            // Match the acceptor's admin-mint enforcement: pass arrays so
+            // sumVerifiedAdminMints / buildVerifiedMintedPubkeySet are used
+            // instead of falling back to our local admin core (which can
+            // diverge from the acceptor's view across machines).
             const snap = await getRemoteBalance(
               acceptorLedgerKey,
               acceptorPubkey,
               5000,
               msg.admin_core_key,
-              msg.admin_mints,
+              msg.admin_mints ?? [],
+              msg.counterparty_admin_mints ?? [],
+              msg.counterparty_ledger_keys,
             ).catch(() => null);
             if (!snap || snap.coreLength !== msg.next_nonce) {
               console.error("  acceptor core unreachable or nonce mismatch — task cancelled");
@@ -306,25 +318,39 @@ export const runCommand = new Command("run")
     });
 
     const handleDiff = async (patch: string) => {
-      if (!patch || patch.trim() === "") {
-        acceptorPeer?.send({ type: "task:cancel", task_id: taskId });
-        console.log("  no changes · task rejected");
-        await cleanup(0);
-        return;
-      }
+      const fullCost = cost;
+      const halfCost = Math.floor(cost / 2);
+      const hasPatch = !!patch && patch.trim() !== "";
 
-      const files = getChangedFiles(patch);
-      const insertions = (patch.match(/^\+[^+]/gm) ?? []).length;
-      const deletions  = (patch.match(/^-[^-]/gm) ?? []).length;
-      console.log(`\n  ${files.length} file(s) changed  +${insertions} / -${deletions}`);
-      for (const f of files) console.log(`    • ${f}`);
+      // Charge half on no-diff or user-reject so the acceptor is compensated for
+      // the work they actually performed (LLM API spend, sandbox time). Mirrors
+      // the chat.tsx policy. Without this, an `ash run` requester gets a free
+      // attempt for every empty-diff outcome.
+      let amount: number;
+      let applyRequested = false;
+      let outcomeLabel: string;
 
-      const shouldApply = opts.yes ? true : await confirm({ message: "Apply these changes?" });
-      if (!shouldApply) {
-        acceptorPeer?.send({ type: "task:cancel", task_id: taskId });
-        console.log("  rejected · patch discarded");
-        await cleanup(0);
-        return;
+      if (!hasPatch) {
+        amount = halfCost;
+        outcomeLabel = "no changes";
+        console.log(`\n  no diff · auto half-charge (${halfCost}cr)`);
+      } else {
+        const files = getChangedFiles(patch);
+        const insertions = (patch.match(/^\+[^+]/gm) ?? []).length;
+        const deletions  = (patch.match(/^-[^-]/gm) ?? []).length;
+        console.log(`\n  ${files.length} file(s) changed  +${insertions} / -${deletions}`);
+        for (const f of files) console.log(`    • ${f}`);
+
+        const shouldApply = opts.yes ? true : await confirm({ message: "Apply these changes?" });
+        if (!shouldApply) {
+          amount = halfCost;
+          outcomeLabel = "rejected";
+          console.log(`  patch discarded · half-charge (${halfCost}cr)`);
+        } else {
+          amount = fullCost;
+          applyRequested = true;
+          outcomeLabel = "applied";
+        }
       }
 
       // Build SpendCheckpointEvent inside the per-pubkey mutex so balance + nonce
@@ -337,8 +363,8 @@ export const runCommand = new Command("run")
           type: "spend_checkpoint",
           nonce: spendNonce,
           timestamp: new Date().toISOString(),
-          balance: currentBalance - cost,
-          amount: cost,
+          balance: currentBalance - amount,
+          amount,
           task_id: taskId,
           counterparty_pubkey: acceptorPubkey ?? "",
           owner_pubkey: userId,
@@ -384,7 +410,7 @@ export const runCommand = new Command("run")
         const aec = settleMsg.acceptor_earn_checkpoint;
         if (!aec) throw new Error("earn-missing");
         if (!acceptorSnapshot) throw new Error("earn-no-snapshot");
-        const expectedAcceptorEarn = splitFee(cost).acceptor;
+        const expectedAcceptorEarn = splitFee(amount).acceptor;
         let aecSigOk = false;
         try {
           aecSigOk = verifyEd25519(
@@ -442,9 +468,12 @@ export const runCommand = new Command("run")
         });
       }
 
-      const applied = await applyPatch(patch, absDir);
-
-      console.log(`\n  ${applied.success ? "patch applied" : "patch conflict"} · ${cost}cr spent`);
+      if (applyRequested) {
+        const applied = await applyPatch(patch, absDir);
+        console.log(`\n  ${applied.success ? "patch applied" : "patch conflict"} · ${amount}cr spent`);
+      } else {
+        console.log(`\n  ${outcomeLabel} · ${amount}cr spent`);
+      }
       await cleanup(0);
     };
 

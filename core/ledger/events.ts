@@ -68,7 +68,7 @@ export async function appendEvent(ownerPubkeyHex: string, event: Event): Promise
 // `startIndex` allows partial replay from a known-good checkpoint position,
 // so post-checkpoint legacy events (e.g. mine EarnEvents) are still counted.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function replayBalance(core: any, ownerPubkeyHex: string, startingBalance = 0, startIndex = 0): Promise<number> {
+async function replayBalance(core: any, ownerPubkeyHex: string, startingBalance = 0, startIndex = 0, verifiedMintedPubkeys?: Set<string> | null, waitForBlocks = false, counterpartyKeyOverrides?: Record<string, string>): Promise<number> {
   let balance = startingBalance;
   const len: number = core.length;
   let ownerPubKey: ReturnType<typeof rawHexToPublicKey> | null = null;
@@ -115,7 +115,8 @@ async function replayBalance(core: any, ownerPubkeyHex: string, startingBalance 
         balance -= event.amount;
       } else if (event.type === "earn") {
         if (seenEarnTaskIds.has(event.task_id)) continue;
-        if (!(await verifyEarnCrossRef(event, ownerPubkeyHex, coreCache))) continue;
+        const accepted = await verifyEarnCrossRef(event, ownerPubkeyHex, coreCache, verifiedMintedPubkeys, waitForBlocks, counterpartyKeyOverrides);
+        if (!accepted) continue;
         seenEarnTaskIds.add(event.task_id);
         balance += event.amount;
       }
@@ -140,6 +141,9 @@ async function verifyEarnCrossRef(
   ownerPubkeyHex: string,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   coreCache: Map<string, any>,
+  verifiedMintedPubkeys?: Set<string> | null,
+  waitForBlocks = false,
+  counterpartyKeyOverrides?: Record<string, string>,
 ): Promise<boolean> {
   let counterpartyPub;
   try {
@@ -207,15 +211,26 @@ async function verifyEarnCrossRef(
   // Memoized via coreCache so a log with N earns from the same counterparty
   // doesn't rescan the admin core N times.
   // Admin is exempt: it never mints to itself so replayAdminMints(ADMIN_PUBKEY)=0.
-  if (ADMIN_PUBKEY && earn.counterparty_pubkey !== ADMIN_PUBKEY) {
-    const mintCacheKey = `__mints__:${earn.counterparty_pubkey}`;
-    let cpMints = coreCache.get(mintCacheKey) as number | undefined;
-    if (cpMints === undefined) {
-      cpMints = await replayAdminMints(earn.counterparty_pubkey);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      coreCache.set(mintCacheKey, cpMints as any);
+  // verifiedMintedPubkeys disambiguates three modes for cross-side consistency:
+  //   - Set: strict mode using a pre-verified set (mirrors acceptor's view)
+  //   - null: explicit no-enforce (acceptor signaled they don't gate on admin mints,
+  //           e.g. their ADMIN_PUBKEY is unset — we must match to compute the same balance)
+  //   - undefined: legacy fallback to replayAdminMints against the local admin core
+  if (verifiedMintedPubkeys === null) {
+    // skip admin mint check entirely
+  } else if (ADMIN_PUBKEY && earn.counterparty_pubkey !== ADMIN_PUBKEY) {
+    if (verifiedMintedPubkeys) {
+      if (!verifiedMintedPubkeys.has(earn.counterparty_pubkey)) return false;
+    } else {
+      const mintCacheKey = `__mints__:${earn.counterparty_pubkey}`;
+      let cpMints = coreCache.get(mintCacheKey) as number | undefined;
+      if (cpMints === undefined) {
+        cpMints = await replayAdminMints(earn.counterparty_pubkey);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        coreCache.set(mintCacheKey, cpMints as any);
+      }
+      if (cpMints <= 0) return false;
     }
-    if (cpMints <= 0) return false;
   }
 
   // Cross-ref: find a matching signed SpendEvent on the counterparty's log.
@@ -230,20 +245,35 @@ async function verifyEarnCrossRef(
   let cpCore = coreCache.get(earn.counterparty_pubkey);
   if (!cpCore) {
     try {
-      const mappedKey = await getPeerLedgerKey(earn.counterparty_pubkey);
+      // Caller-provided override takes precedence over the local peer_keys cache.
+      // The acceptor (who signed this earn's counterpart spend) ships their own
+      // pubkey -> ledger_core_key mapping in `task:claim` so the requester opens
+      // the same Hypercore the acceptor used at earn time, even if the requester's
+      // local cache is stale (peer rotated their core).
+      const mappedKey = counterpartyKeyOverrides?.[earn.counterparty_pubkey]
+        ?? await getPeerLedgerKey(earn.counterparty_pubkey);
       if (mappedKey) {
         const store = await getCorestore();
         cpCore = store.get(Buffer.from(mappedKey, "hex"), { valueEncoding: "utf-8" });
         await cpCore.ready();
-        // Sync merkle tree then download actual blocks so { wait: false } reads succeed.
+        // Sync merkle tree. When waitForBlocks=true (active swarm context like task
+        // settlement) wait for full block download with no timeout — checkpoint
+        // existence will keep this fast in steady state. With waitForBlocks=false
+        // (e.g. `ash status`) keep the original short timeout so balance reads
+        // don't hang when the swarm isn't joined.
+        const updateTimeoutMs = waitForBlocks ? 30000 : 2000;
         await Promise.race([
           Promise.resolve(cpCore.update?.()).catch(() => undefined),
-          new Promise<void>((r) => setTimeout(r, 2000)),
+          new Promise<void>((r) => setTimeout(r, updateTimeoutMs)),
         ]);
         if (cpCore.length > 0) {
           try {
             const dl = cpCore.download({ start: 0, end: cpCore.length });
-            await Promise.race([dl.done(), new Promise<void>((r) => setTimeout(r, 3000))]);
+            if (waitForBlocks) {
+              await dl.done();
+            } else {
+              await Promise.race([dl.done(), new Promise<void>((r) => setTimeout(r, 3000))]);
+            }
             dl.destroy?.();
           } catch { /* non-fatal */ }
         }
@@ -259,11 +289,9 @@ async function verifyEarnCrossRef(
   if (cpLen === 0) return false;
   for (let j = 0; j < cpLen; j++) {
     try {
-      // `wait: false` returns null for blocks we don't have locally instead
-      // of blocking forever on replication. Balance replay runs without a
-      // swarm (e.g. `ash status`), so a remote block is never going to
-      // arrive here — skip it rather than hang.
-      const raw = await cpCore.get(j, { wait: false }) as string | null;
+      // `wait: false` for status-style reads (no swarm); `wait: true` for
+      // active swarm reads where we can pull missing blocks on demand.
+      const raw = await cpCore.get(j, { wait: waitForBlocks }) as string | null;
       if (raw == null) continue;
       const ev = JSON.parse(raw) as Event;
       if (
@@ -451,22 +479,19 @@ async function getLatestCheckpoint(core: any, ownerPubkeyHex: string): Promise<S
   return null;
 }
 
-/** Returns the balance for the given owner by replaying their local Hypercore. */
-export async function getLocalBalance(ownerPubkeyHex: string): Promise<number> {
+/** Returns the balance for the given owner by replaying their local Hypercore.
+ *  Pass `waitForBlocks=true` when called from an active-swarm context (e.g. task
+ *  settlement) so cross-ref reads can pull missing counterparty blocks on demand —
+ *  required for cross-side balance determinism. Status-style callers leave it false. */
+export async function getLocalBalance(ownerPubkeyHex: string, waitForBlocks = false): Promise<number> {
   const core = await getUserCore(ownerPubkeyHex);
   const checkpoint = await getLatestCheckpoint(core, ownerPubkeyHex);
   if (checkpoint !== null) {
-    // Fast path: checkpoint.balance is the base. Replay any legacy earn/spend events
-    // appended after the checkpoint nonce (e.g. mine EarnEvents from mine.ts via
-    // appendNextEvent). Admin mints are already baked into checkpoint.balance at
-    // settlement time; any additional admin mint issued after the checkpoint is
-    // reflected in the next settlement's checkpoint (v0.1 has signup-only mints).
-    return replayBalance(core, ownerPubkeyHex, checkpoint.balance, checkpoint.nonce + 1);
+    return replayBalance(core, ownerPubkeyHex, checkpoint.balance, checkpoint.nonce + 1, undefined, waitForBlocks);
   }
-  // No checkpoint yet: full replay for backward compat with pre-checkpoint cores.
   const coreKeyHex = (core.key as Buffer).toString("hex");
   const mints = await replayAdminMints(ownerPubkeyHex, coreKeyHex);
-  return replayBalance(core, ownerPubkeyHex, mints);
+  return replayBalance(core, ownerPubkeyHex, mints, 0, undefined, waitForBlocks);
 }
 
 /**
@@ -484,6 +509,8 @@ export async function getRemoteBalance(
   timeoutMs = 8000,
   adminCoreKeyOverride?: string,
   adminMintsOverride?: unknown[],
+  counterpartyMintsOverride?: unknown[] | null,
+  counterpartyKeyOverrides?: Record<string, string>,
 ): Promise<{ balance: number; coreLength: number }> {
   const store = await getCorestore();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -524,15 +551,23 @@ export async function getRemoteBalance(
   // Capture length after replication so callers can validate incoming nonces.
   const coreLength: number = core.length ?? 0;
 
+  // counterpartyMintsOverride decides how `verifyEarnCrossRef` gates each earn:
+  //   - array: strict mode — build verified set, only listed pubkeys pass
+  //   - null:  no-enforce — acceptor doesn't gate on admin mints (e.g. their
+  //            ADMIN_PUBKEY is unset); requester must match to compute the same balance
+  //   - undefined: legacy fallback to local admin core
+  const verifiedCounterpartySet = counterpartyMintsOverride === null
+    ? null
+    : counterpartyMintsOverride !== undefined
+      ? buildVerifiedMintedPubkeySet(counterpartyMintsOverride)
+      : undefined;
+
   // Fast-path: checkpoint balance + post-checkpoint deltas (mirrors getLocalBalance logic).
   // Both paths must be byte-identical so bilateral `prev ± amount === proposed.balance`
   // checks are sound regardless of which side reads local vs remote.
-  const checkpoint = await getLatestCheckpoint(core, recipientPubkey);
+  const checkpoint = await getLatestCheckpoint(core, recipientPubkey, true);
   if (checkpoint !== null) {
-    // Admin mints are baked into checkpoint.balance at settlement time; no extra mint
-    // addition here. Mirrors getLocalBalance fast-path exactly so bilateral
-    // `prev ± amount === proposed.balance` checks are sound.
-    const balance = await replayBalance(core, recipientPubkey, checkpoint.balance, checkpoint.nonce + 1);
+    const balance = await replayBalance(core, recipientPubkey, checkpoint.balance, checkpoint.nonce + 1, verifiedCounterpartySet, true, counterpartyKeyOverrides);
     return { balance, coreLength };
   }
   // Fallback: full replay for pre-checkpoint cores or peers that never transacted.
@@ -542,7 +577,43 @@ export async function getRemoteBalance(
   const mints = adminMintsOverride !== undefined
     ? sumVerifiedAdminMints(adminMintsOverride, recipientPubkey, coreKeyHex)
     : await replayAdminMints(recipientPubkey, coreKeyHex, adminCoreKeyOverride);
-  return { balance: await replayBalance(core, recipientPubkey, mints), coreLength };
+  return { balance: await replayBalance(core, recipientPubkey, mints, 0, verifiedCounterpartySet, true, counterpartyKeyOverrides), coreLength };
+}
+
+/**
+ * Verifies a list of admin mint events and returns the set of recipient pubkeys
+ * that have at least one valid mint. Mirrors `sumVerifiedAdminMints` checks but
+ * tracks identity rather than amounts. Used by `getRemoteBalance` so cross-side
+ * earn cross-ref checks can short-circuit `replayAdminMints` calls into the
+ * local admin core (which differs across machines).
+ */
+export function buildVerifiedMintedPubkeySet(mints: unknown[]): Set<string> {
+  const out = new Set<string>();
+  if (!ADMIN_PUBKEY) return out;
+  let adminPubKey: ReturnType<typeof rawHexToPublicKey>;
+  try {
+    adminPubKey = rawHexToPublicKey(ADMIN_PUBKEY);
+  } catch {
+    return out;
+  }
+  for (const mintRaw of mints) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const event = mintRaw as any;
+      if (event.type !== "mint" || event.signer_pubkey !== ADMIN_PUBKEY) continue;
+      if (typeof event.recipient_pubkey !== "string") continue;
+      if (typeof event.signature !== "string" || event.signature.length === 0) continue;
+      if (typeof event.amount !== "number" || !Number.isFinite(event.amount) || event.amount <= 0) continue;
+      const valid = verifyEd25519(
+        canonicalStringify(eventWithoutSignature(event)),
+        event.signature,
+        adminPubKey,
+      );
+      if (!valid) continue;
+      out.add(event.recipient_pubkey);
+    } catch { /* skip */ }
+  }
+  return out;
 }
 
 /** Returns all raw events from the owner's own Hypercore (earn/spend). */

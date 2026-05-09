@@ -46,8 +46,8 @@ import {
   getRemotePeerBalance,
 } from "../p2p_state.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
-import { getAdminMintsFor } from "../../core/ledger/events.ts";
-import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
+import { getAdminMintsFor, getEvents } from "../../core/ledger/events.ts";
+import { registerPeerLedgerKey, getPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
 import { LEDGER_TOPIC, ADMIN_LEDGER_KEY, ADMIN_PUBKEY } from "../../shared/constants.ts";
 import { signEd25519, verifyEd25519, rawHexToPublicKey } from "../../core/crypto/ed25519.ts";
 // signEd25519 is used in the cosigner-side mine:claim handler (~line 506);
@@ -762,6 +762,38 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
     const myAdminMints = ADMIN_PUBKEY
       ? await getAdminMintsFor(myPub).catch(() => [])
       : [];
+    // Collect admin mints for every counterparty referenced in our earn events
+    // so the requester can verify cross-refs without touching their local admin
+    // core (which may differ from ours and skew the balance computation).
+    // Mine-style earns (task_id starts with "github:") don't need this — they
+    // use a different cross-ref path that doesn't gate on admin mint status.
+    let counterpartyAdminMints: unknown[] = [];
+    let counterpartyLedgerKeys: Record<string, string> = {};
+    if (ADMIN_PUBKEY) {
+      try {
+        const events = await getEvents(myPub);
+        const counterparties = new Set<string>();
+        for (const ev of events) {
+          if (ev.type === "earn" && !ev.task_id.startsWith("github:") && ev.counterparty_pubkey !== ADMIN_PUBKEY) {
+            counterparties.add(ev.counterparty_pubkey);
+          }
+        }
+        const mintArrays = await Promise.all(
+          [...counterparties].map((cp) => getAdminMintsFor(cp).catch(() => [])),
+        );
+        counterpartyAdminMints = mintArrays.flat();
+        // Send our authoritative pubkey -> ledger_core_key mapping for every
+        // counterparty referenced in our earns. The requester's local cache may
+        // be stale (peer rotated cores) — using ours ensures both sides open
+        // the same Hypercore for cross-ref, making balance computation match.
+        const cps = [...counterparties];
+        const keys = await Promise.all(cps.map((cp) => getPeerLedgerKey(cp).catch(() => undefined)));
+        for (let i = 0; i < cps.length; i++) {
+          const k = keys[i];
+          if (k) counterpartyLedgerKeys[cps[i]] = k;
+        }
+      } catch { /* non-fatal — falls back to local admin core on requester */ }
+    }
     const claim: P2PMessage = {
       type: "task:claim",
       task_id: msg.task_id,
@@ -771,6 +803,8 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
       acceptor_ledger_key: myLedgerKey,
       ...(myAdminCoreKey ? { admin_core_key: myAdminCoreKey } : {}),
       ...(myAdminMints.length > 0 ? { admin_mints: myAdminMints } : {}),
+      ...(counterpartyAdminMints.length > 0 ? { counterparty_admin_mints: counterpartyAdminMints } : {}),
+      ...(Object.keys(counterpartyLedgerKeys).length > 0 ? { counterparty_ledger_keys: counterpartyLedgerKeys } : {}),
     };
     peer.send(claim);
 
