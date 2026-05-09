@@ -99,6 +99,7 @@ async function replayBalance(core: any, ownerPubkeyHex: string, startingBalance 
       // event type means adding a case here.
       if (event.type === "spend") {
         if (seenSpendNonces.has(event.nonce)) continue;
+        if (event.amount < 0) continue; // negative amount would inflate balance
         const ok = verifyEd25519(
           canonicalStringify(eventWithoutSignature(event)),
           event.signature,
