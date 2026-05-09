@@ -23,21 +23,20 @@ import {
 import { packDirectory } from "../../core/packaging/pack.ts";
 import { buildTaskAad } from "../../core/crypto/aes.ts";
 import { applyPatch, getChangedFiles } from "../../core/diff/apply.ts";
-import { signEd25519, verifyEd25519, rawHexToPublicKey } from "../../core/crypto/ed25519.ts";
+import { signEd25519 } from "../../core/crypto/ed25519.ts";
 import { canonicalStringify } from "../../shared/canonical.ts";
 import {
   checkpointPayload,
-  type SpendCheckpointEvent,
   type EarnCheckpointEvent,
 } from "../../shared/events.ts";
 import {
-  appendCheckpointEvent,
   closeLocalStore,
   getLedgerCoreKey,
   reservePendingSpend,
   releasePendingSpend,
   getSpendableBalance,
 } from "../p2p_state.ts";
+import { settleAsRequester } from "../requester_settle.ts";
 import { getRemoteBalance } from "../../core/ledger/events.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
 import { LEDGER_TOPIC, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
@@ -45,7 +44,6 @@ import { AshSwarm, type SwarmPeer } from "../../core/p2p/swarm.ts";
 import type { P2PMessage } from "../../core/p2p/messages.ts";
 import { sanitizeLogLine } from "../../core/p2p/messages.ts";
 import { DEFAULT_MODEL_TIER } from "../../shared/types.ts";
-import { splitFee } from "../../shared/policy.ts";
 import { CHUNK_BYTES } from "../../shared/protocol.ts";
 import { ensureInitialized, NotInitializedError } from "../guard.ts";
 
@@ -353,89 +351,26 @@ export const runCommand = new Command("run")
         }
       }
 
-      // Build SpendCheckpointEvent inside the per-pubkey mutex so balance + nonce
-      // are read atomically with the append. Earn checkpoint is validated here too
-      // (before spend append) so a bad earn cannot arrive after we're committed.
+      // Drive the bilateral cosign protocol. settleAsRequester signs+sends our
+      // spend, awaits the acceptor's task:settle, validates everything, and
+      // appends our spend checkpoint atomically inside the per-pubkey mutex.
       let spendSettled = false;
       let settleEarnCheckpoint: EarnCheckpointEvent | undefined;
-      await appendCheckpointEvent(userId, async (spendNonce, currentBalance) => {
-        const spendCheckpointBase: Omit<SpendCheckpointEvent, "signature"> = {
-          type: "spend_checkpoint",
-          nonce: spendNonce,
-          timestamp: new Date().toISOString(),
-          balance: currentBalance - amount,
+      try {
+        if (!acceptorPeer || !acceptorPubkey) throw new Error("earn-no-snapshot");
+        const { earnCheckpoint } = await settleAsRequester({
+          taskId,
+          userId,
+          edPriv,
           amount,
-          task_id: taskId,
-          counterparty_pubkey: acceptorPubkey ?? "",
-          owner_pubkey: userId,
-          sig_counterparty: "",
-        };
-        const spendCheckpoint: SpendCheckpointEvent = {
-          ...spendCheckpointBase,
-          signature: signEd25519(canonicalStringify(checkpointPayload(spendCheckpointBase as SpendCheckpointEvent)), edPriv),
-        };
-        acceptorPeer?.send({ type: "spend:cosign", task_id: taskId, spend_checkpoint: spendCheckpoint });
-
-        const settleMsg = await new Promise<{ action: "approve" | "reject"; requester_checkpoint_cosig?: string; acceptor_earn_checkpoint?: EarnCheckpointEvent }>((resolve) => {
-          let done = false;
-          const settle = (v: { action: "approve" | "reject"; requester_checkpoint_cosig?: string; acceptor_earn_checkpoint?: EarnCheckpointEvent }) => {
-            if (done) return;
-            done = true;
-            clearTimeout(t);
-            resolve(v);
-          };
-          resolveSettle = settle;
-          const t = setTimeout(() => settle({ action: "reject" }), 30_000);
+          acceptorPeer,
+          acceptorPubkey,
+          acceptorSnapshot,
+          setSettleResolver: (resolve) => { resolveSettle = resolve; },
         });
-        resolveSettle = null;
-
-        if (settleMsg.action !== "approve") throw new Error("rejected");
-
-        const cosig = settleMsg.requester_checkpoint_cosig;
-        if (!cosig) throw new Error("missing-cosig");
-
-        // Verify acceptor's Ed25519 cosignature over our spend checkpoint payload.
-        const cosigOk = acceptorPubkey
-          ? verifyEd25519(
-              canonicalStringify(checkpointPayload(spendCheckpoint)),
-              cosig,
-              rawHexToPublicKey(acceptorPubkey),
-            )
-          : false;
-        if (!cosigOk) throw new Error("cosig-invalid");
-
-        // Validate earn checkpoint BEFORE spend append (settlement ordering).
-        // acceptorSnapshot was captured at task:claim time (before work started),
-        // so nonce and balance are the authoritative pre-task values.
-        const aec = settleMsg.acceptor_earn_checkpoint;
-        if (!aec) throw new Error("earn-missing");
-        if (!acceptorSnapshot) throw new Error("earn-no-snapshot");
-        const expectedAcceptorEarn = splitFee(amount).acceptor;
-        let aecSigOk = false;
-        try {
-          aecSigOk = verifyEd25519(
-            canonicalStringify(checkpointPayload(aec)),
-            aec.signature,
-            rawHexToPublicKey(acceptorPubkey!),
-          );
-        } catch { /* malformed */ }
-        const aecValid =
-          aec.type === "earn_checkpoint" &&
-          aec.task_id === taskId &&
-          aec.amount === expectedAcceptorEarn &&
-          aec.counterparty_pubkey === userId &&
-          aec.owner_pubkey === acceptorPubkey &&
-          aec.nonce === acceptorSnapshot.coreLength &&
-          aec.balance === acceptorSnapshot.balance + expectedAcceptorEarn &&
-          aecSigOk;
-        if (!aecValid) throw new Error("earn-invalid");
-        settleEarnCheckpoint = aec;
-
-        // spendSettled is set only after appendEvent succeeds (torn-append fix).
-        return { ...spendCheckpoint, sig_counterparty: cosig };
-      }).then(() => {
+        settleEarnCheckpoint = earnCheckpoint;
         spendSettled = true;
-      }).catch((err: unknown) => {
+      } catch (err) {
         const msg = (err as Error).message;
         if (msg === "rejected") {
           console.log("  acceptor rejected · patch discarded");
@@ -443,12 +378,14 @@ export const runCommand = new Command("run")
           console.log("  acceptor missing spend cosig — no credits charged");
         } else if (msg === "cosig-invalid") {
           console.log("  acceptor spend cosig invalid — no credits charged");
-        } else if (msg === "earn-missing" || msg === "earn-no-ledger-key" || msg === "earn-no-snapshot" || msg === "earn-invalid") {
+        } else if (msg === "earn-missing" || msg === "earn-no-snapshot" || msg === "earn-invalid") {
           console.log("  acceptor earn checkpoint invalid — no earn cosign sent");
         } else {
           console.error(`  local spend log failed: ${msg}`);
         }
-      });
+      } finally {
+        resolveSettle = null;
+      }
 
       if (!spendSettled) {
         await cleanup(0);
