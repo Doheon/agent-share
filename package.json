@@ -1,6 +1,6 @@
 {
   "name": "@doheon/ash",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Distributed P2P AI coding agent network — share idle compute, earn credits, fully self-hosted.",
   "keywords": [
     "ai",

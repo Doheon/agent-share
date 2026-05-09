@@ -11,7 +11,7 @@
 // layer (isValidMessage rejects old-format messages safely), and the version bump
 // is deferred to the next release cut. See CLAUDE.md for the bump policy.
 export const PROTOCOL_VERSION = 1 as const;
-export const CLIENT_VERSION = "0.1.6" as const;
+export const CLIENT_VERSION = "0.1.7" as const;
 
 
 /** Maximum size of a packed task blob (raw bytes). Enforced both at pack-time
