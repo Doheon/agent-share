@@ -34,11 +34,11 @@ import {
   appendCheckpointEvent,
   closeLocalStore,
   getLedgerCoreKey,
-  getRemotePeerBalance,
   reservePendingSpend,
   releasePendingSpend,
   getSpendableBalance,
 } from "../p2p_state.ts";
+import { getRemoteBalance } from "../../core/ledger/events.ts";
 import { getCorestore } from "../../core/ledger/store.ts";
 import { LEDGER_TOPIC, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
 import { AshSwarm, type SwarmPeer } from "../../core/p2p/swarm.ts";
@@ -203,6 +203,7 @@ export const runCommand = new Command("run")
     let acceptorPeer: SwarmPeer | null = null;
     let acceptorPubkey: string | null = null;
     let acceptorLedgerKey: string | null = null;
+    let acceptorSnapshot: { balance: number; coreLength: number } | null = null;
     let resolveSettle: ((msg: { action: "approve" | "reject"; requester_checkpoint_cosig?: string; acceptor_earn_checkpoint?: EarnCheckpointEvent }) => void) | null = null;
 
     swarm.onMessage(async (peer, msg) => {
@@ -213,6 +214,21 @@ export const runCommand = new Command("run")
           acceptorPeer = peer;
           acceptorPubkey = msg.acceptor_pubkey;
           acceptorLedgerKey = msg.acceptor_ledger_key ?? null;
+
+          // Snapshot acceptor's core state before starting work so we can
+          // validate the earn checkpoint at settlement without re-replicating.
+          // If the core is unreachable or mismatches next_nonce, cancel now.
+          if (acceptorLedgerKey) {
+            const snap = await getRemoteBalance(acceptorLedgerKey, acceptorPubkey, 5000).catch(() => null);
+            if (!snap || snap.coreLength !== msg.next_nonce) {
+              console.error("  acceptor core unreachable or nonce mismatch — task cancelled");
+              peer.send({ type: "task:cancel", task_id: taskId });
+              await cleanup(1);
+              return;
+            }
+            acceptorSnapshot = snap;
+          }
+
           try {
             const acceptorPub = await importPublicKeyPem(msg.rsa_public_key);
             const encAes = await encryptAesKey(aesKeyRaw!, acceptorPub);
@@ -337,21 +353,12 @@ export const runCommand = new Command("run")
         if (!cosigOk) throw new Error("cosig-invalid");
 
         // Validate earn checkpoint BEFORE spend append (settlement ordering).
-        // Hard-reject if ledger key missing or replication fails — mirrors the
-        // acceptor-side balanceLookupOk pattern (C-2/C-3 fix).
+        // acceptorSnapshot was captured at task:claim time (before work started),
+        // so nonce and balance are the authoritative pre-task values.
         const aec = settleMsg.acceptor_earn_checkpoint;
         if (!aec) throw new Error("earn-missing");
-        if (!acceptorLedgerKey) throw new Error("earn-no-ledger-key");
+        if (!acceptorSnapshot) throw new Error("earn-no-snapshot");
         const expectedAcceptorEarn = splitFee(cost).acceptor;
-        let earnLookupOk = false;
-        let prevAcceptorBalance = 0;
-        let acceptorCoreLength = -1;
-        try {
-          const aecInfo = await getRemotePeerBalance(acceptorLedgerKey, acceptorPubkey!);
-          prevAcceptorBalance = aecInfo.balance;
-          acceptorCoreLength = aecInfo.coreLength;
-          earnLookupOk = true;
-        } catch { /* replication failed — hard reject */ }
         let aecSigOk = false;
         try {
           aecSigOk = verifyEd25519(
@@ -361,14 +368,13 @@ export const runCommand = new Command("run")
           );
         } catch { /* malformed */ }
         const aecValid =
-          earnLookupOk &&
-          aec.nonce === acceptorCoreLength &&
-          aec.balance === prevAcceptorBalance + expectedAcceptorEarn &&
           aec.type === "earn_checkpoint" &&
           aec.task_id === taskId &&
           aec.amount === expectedAcceptorEarn &&
           aec.counterparty_pubkey === userId &&
           aec.owner_pubkey === acceptorPubkey &&
+          aec.nonce === acceptorSnapshot.coreLength &&
+          aec.balance === acceptorSnapshot.balance + expectedAcceptorEarn &&
           aecSigOk;
         if (!aecValid) throw new Error("earn-invalid");
         settleEarnCheckpoint = aec;
