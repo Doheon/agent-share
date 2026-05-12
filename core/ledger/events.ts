@@ -14,6 +14,7 @@ import { eventWithoutSignature, checkpointPayload } from "../../shared/events.ts
 import { ADMIN_PUBKEY, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
 import { verifyEd25519, rawHexToPublicKey } from "../crypto/ed25519.ts";
 import { canonicalStringify } from "../../shared/canonical.ts";
+import { withTimeout } from "../util/async.ts";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function getUserCore(ownerPubkeyHex: string): Promise<any> {
@@ -262,17 +263,17 @@ async function verifyEarnCrossRef(
         // (e.g. `ash status`) keep the original short timeout so balance reads
         // don't hang when the swarm isn't joined.
         const updateTimeoutMs = waitForBlocks ? 30000 : 2000;
-        await Promise.race([
+        await withTimeout(
           Promise.resolve(cpCore.update?.()).catch(() => undefined),
-          new Promise<void>((r) => setTimeout(r, updateTimeoutMs)),
-        ]);
+          updateTimeoutMs,
+        );
         if (cpCore.length > 0) {
           try {
             const dl = cpCore.download({ start: 0, end: cpCore.length });
             if (waitForBlocks) {
               await dl.done();
             } else {
-              await Promise.race([dl.done(), new Promise<void>((r) => setTimeout(r, 3000))]);
+              await withTimeout(dl.done(), 3000);
             }
             dl.destroy?.();
           } catch { /* non-fatal */ }
@@ -339,14 +340,11 @@ async function replayAdminMints(recipientPubkey: string, recipientCoreKeyHex?: s
     if (!adminCore) return 0;
     // Pull latest blocks from any connected peer. Allow up to 8 s on cold
     // starts (DHT connection + first replication round-trip); cached after.
-    await Promise.race([
-      adminCore.update?.().catch(() => undefined),
-      new Promise<void>((r) => setTimeout(r, 8000)),
-    ]);
+    await withTimeout(adminCore.update?.().catch(() => undefined), 8000);
     if (adminCore.length > 0) {
       try {
         const dl = adminCore.download({ start: 0, end: adminCore.length });
-        await Promise.race([dl.done(), new Promise<void>((r) => setTimeout(r, 5000))]);
+        await withTimeout(dl.done(), 5000);
         dl.destroy?.();
       } catch { /* non-fatal */ }
     }
@@ -535,10 +533,7 @@ export async function getRemoteBalance(
     );
   }
 
-  await Promise.race([
-    Promise.all(updates),
-    new Promise<void>((r) => setTimeout(r, timeoutMs)),
-  ]);
+  await withTimeout(Promise.all(updates), timeoutMs);
 
   // Fallback: if the key-based open returned no blocks (peer not yet
   // connected on LEDGER_TOPIC), try the locally-registered name-based core
@@ -567,10 +562,7 @@ export async function getRemoteBalance(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const dl = (core as any).download?.({ start: 0, end: coreLength });
       if (dl) {
-        await Promise.race([
-          dl.done?.() ?? Promise.resolve(),
-          new Promise<void>((r) => setTimeout(r, timeoutMs)),
-        ]);
+        await withTimeout(dl.done?.() ?? Promise.resolve(), timeoutMs);
         dl.destroy?.();
       }
     } catch { /* non-fatal — checkpoint scan below will still try wait:true */ }
@@ -706,14 +698,11 @@ export async function getAdminMintsFor(recipientPubkey: string): Promise<Event[]
   try {
     const adminCore = await openAdminCore();
     if (!adminCore) return [];
-    await Promise.race([
-      adminCore.update?.().catch(() => undefined),
-      new Promise<void>((r) => setTimeout(r, 8000)),
-    ]);
+    await withTimeout(adminCore.update?.().catch(() => undefined), 8000);
     if (adminCore.length > 0) {
       try {
         const dl = adminCore.download({ start: 0, end: adminCore.length });
-        await Promise.race([dl.done(), new Promise<void>((r) => setTimeout(r, 5000))]);
+        await withTimeout(dl.done(), 5000);
         dl.destroy?.();
       } catch { /* non-fatal */ }
     }

@@ -46,6 +46,7 @@ import { DEFAULT_MODEL_TIER } from "../../shared/types.ts";
 import { decideDiffOutcome } from "../../shared/policy.ts";
 import { CHUNK_BYTES } from "../../shared/protocol.ts";
 import { ensureInitialized, NotInitializedError } from "../guard.ts";
+import { createLedgerReplicationSwarm } from "../ledger_replication.ts";
 
 export const runCommand = new Command("run")
   .description("Send a one-shot prompt to the P2P network and apply the result")
@@ -128,23 +129,12 @@ export const runCommand = new Command("run")
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let repSwarm: any = null;
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { default: Hyperswarm } = (await import("hyperswarm")) as any;
-      repSwarm = new Hyperswarm();
-      const store = await getCorestore();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let adminCore: any = null;
-      if (ADMIN_LEDGER_KEY) {
-        adminCore = store.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
-        await adminCore.ready().catch(() => {});
-      }
-      repSwarm.join(LEDGER_TOPIC);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      repSwarm.on("connection", (conn: any) => store.replicate(conn));
-      await Promise.race([repSwarm.flush(), new Promise<void>((r) => setTimeout(r, 5000))]);
+      repSwarm = await createLedgerReplicationSwarm();
       // Sync admin core after LEDGER_TOPIC peers connect so replayAdminMints
       // sees the correct mints when we snapshot acceptor balance at task:claim.
-      if (adminCore) {
+      if (ADMIN_LEDGER_KEY) {
+        const store = await getCorestore();
+        const adminCore = store.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
         await Promise.race([adminCore.update().catch(() => {}), new Promise<void>((r) => setTimeout(r, 5000))]);
         if ((adminCore.length ?? 0) > 0) {
           try {

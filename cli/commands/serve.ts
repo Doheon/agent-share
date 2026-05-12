@@ -45,10 +45,10 @@ import {
   getNextNonce,
   getRemotePeerBalance,
 } from "../p2p_state.ts";
-import { getCorestore } from "../../core/ledger/store.ts";
 import { getAdminMintsFor, getEvents } from "../../core/ledger/events.ts";
 import { registerPeerLedgerKey, getPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
-import { LEDGER_TOPIC, ADMIN_LEDGER_KEY, ADMIN_PUBKEY } from "../../shared/constants.ts";
+import { ADMIN_PUBKEY } from "../../shared/constants.ts";
+import { createLedgerReplicationSwarm } from "../ledger_replication.ts";
 import { signEd25519, verifyEd25519, rawHexToPublicKey } from "../../core/crypto/ed25519.ts";
 // signEd25519 is used in the cosigner-side mine:claim handler (~line 506);
 // kept here so the cosign signing path doesn't have to re-import it.
@@ -506,25 +506,10 @@ export async function runServeAi(opts: { count: number; modelTier: string; allow
   // remote event Hypercores are propagated to all peers (global ledger).
   // Uses a separate Hyperswarm join on LEDGER_TOPIC so the stream is not
   // shared with the task JSON protocol.
-  let replicationSwarm: ReturnType<typeof setInterval> | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let replicationSwarm: any = null;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { default: Hyperswarm } = (await import("hyperswarm")) as any;
-    const repSwarm = new Hyperswarm();
-    replicationSwarm = repSwarm;
-    const store = await getCorestore();
-    // Open admin core so Corestore announces it in every replication session.
-    // Without this, doheon2 requesting the admin core by key gets no response
-    // even though the blocks exist on disk — Corestore only advertises cores
-    // that are currently open in memory.
-    if (ADMIN_LEDGER_KEY) {
-      const ac = store.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
-      await ac.ready().catch(() => {});
-    }
-    repSwarm.join(LEDGER_TOPIC);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    repSwarm.on("connection", (conn: any) => store.replicate(conn));
-    await Promise.race([repSwarm.flush(), new Promise<void>((r) => setTimeout(r, 5000))]);
+    replicationSwarm = await createLedgerReplicationSwarm();
   } catch {
     // Ledger replication failure is non-fatal — tasks still work.
   }

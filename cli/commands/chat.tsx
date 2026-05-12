@@ -37,10 +37,9 @@ import {
   getNextNonce,
 } from "../p2p_state.ts";
 import { settleAsRequester, captureAcceptorSnapshot } from "../requester_settle.ts";
-import { getCorestore } from "../../core/ledger/store.ts";
 import { getEvents, getAdminMintsFor } from "../../core/ledger/events.ts";
 import { registerPeerLedgerKey } from "../../core/ledger/peer_keys.ts";
-import { LEDGER_TOPIC, ADMIN_LEDGER_KEY } from "../../shared/constants.ts";
+import { createLedgerReplicationSwarm } from "../ledger_replication.ts";
 import { resolveTier, decideDiffOutcome } from "../../shared/policy.ts";
 import { formatLedgerEvent } from "../../shared/event_format.ts";
 import { AshSwarm, type SwarmPeer } from "../../core/p2p/swarm.ts";
@@ -1636,18 +1635,7 @@ export async function runChat(opts: { model?: string } = {}): Promise<void> {
   let repSwarm: any = null;
   const setupPromise: Promise<{ balance: number; served: number }> = (async () => {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { default: Hyperswarm } = (await import("hyperswarm")) as any;
-      repSwarm = new Hyperswarm();
-      const store = await getCorestore();
-      if (ADMIN_LEDGER_KEY) {
-        const ac = store.get(Buffer.from(ADMIN_LEDGER_KEY, "hex"), { valueEncoding: "utf-8" });
-        await ac.ready().catch(() => {});
-      }
-      repSwarm.join(LEDGER_TOPIC);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      repSwarm.on("connection", (conn: any) => store.replicate(conn));
-      await Promise.race([repSwarm.flush(), new Promise<void>((r) => setTimeout(r, 5000))]);
+      repSwarm = await createLedgerReplicationSwarm();
       await new Promise<void>((r) => setTimeout(r, 2000));
     } catch (err) {
       if (err instanceof Error && err.message) {
