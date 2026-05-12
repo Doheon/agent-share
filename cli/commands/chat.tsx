@@ -667,8 +667,7 @@ function ChatApp({
     }
 
     if (swarm.getPeers().length === 0) {
-      addMsg("  ⎿ no peers connected; nobody can accept your task.", "#e3bd5a");
-      return;
+      addMsg("  ⎿ no peers yet — will announce when one joins (up to 60s)…", "#6b6b6b");
     }
 
     addMsg(`  ${FRAMES[0]} packaging…`, "#6b6b6b");
